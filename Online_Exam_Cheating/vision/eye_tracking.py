@@ -66,8 +66,10 @@ class EyeTrackingGaze:
     if detection_result.face_landmarks:
         landmarks = detection_result.face_landmarks[0]
         iris_center = self.mean_normalized(landmarks)
+        iris_valid = True
     else:
-        iris_center = ([0.0, 0.0], [0.0, 0.0]) # Default or error handling
+        iris_center = ([0.0, 0.0], [0.0, 0.0]) 
+        iris_valid = False
 
 
     results = self.gaze_pipeline.step(frame)
@@ -84,5 +86,7 @@ class EyeTrackingGaze:
     "left_iris_x": iris_center[0][0],
     "left_iris_y": iris_center[0][1],
     "right_iris_x": iris_center[1][0],
-    "right_iris_y": iris_center[1][1]
+    "right_iris_y": iris_center[1][1],
+    "iris_valid": bool(iris_valid)
       }
+
