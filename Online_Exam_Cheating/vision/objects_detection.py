@@ -4,7 +4,6 @@ from ultralytics import YOLO
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-from boxmot.trackers import OccluBoost
 import cv2
 import numpy as np
 
@@ -28,25 +27,26 @@ class ObjectDetection:
 
     self.model = None
     self.model_earphone = None
-    self.tracker = None
     self.landmarker = None
 
-    self.model, self.model_earphone, self.landmarker, self.tracker = self.load_models()
+    self.model, self.model_earphone, self.landmarker = self.load_models()
 
 
   def load_models(self):
     self.model = YOLO(self.yolo_model_path)
     self.model_earphone = YOLO(self.earphone_model_path)
 
+    self.model.to("cuda")
+    self.model_earphone.to("cuda")
+
     options = self.PoseLandmarkerOptions(
       base_options=self.BaseOptions(model_asset_path=self.model_path),
       running_mode=self.VisionRunningMode.VIDEO)
 
-    self.tracker = OccluBoost()
 
     self.landmarker = self.PoseLandmarker.create_from_options(options)
 
-    return self.model, self.model_earphone, self.landmarker, self.tracker
+    return self.model, self.model_earphone, self.landmarker
 
 
   def object_detection(self,frame):
@@ -54,8 +54,8 @@ class ObjectDetection:
     self.objects_boxes = []
     self.dets = []
 
-    results_main = self.model(frame)
-    results_earphone = self.model_earphone(frame)
+    results_main = self.model(frame, verbose=False)
+    results_earphone = self.model_earphone(frame, verbose=False)
 
     model_results = ([
         (results_main, self.model),
@@ -86,9 +86,19 @@ class ObjectDetection:
 
     return self.objects_boxes, self.dets
 
-  def pose_detection(self,frame_rgb,timestamp_ms, w, h):
+  def pose_detection(self,frame,timestamp_ms, w, h):
 
-    result = self.landmarker.detect_for_video(frame_rgb, timestamp_ms)
+    rgb_frame = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
+    
+    mp_image = mp.Image(
+    image_format=mp.ImageFormat.SRGB,
+    data=rgb_frame
+    )
+    
+    result = self.landmarker.detect_for_video(mp_image, timestamp_ms)
 
     if not result.pose_landmarks:
       return None
@@ -137,18 +147,8 @@ class ObjectDetection:
 
     return position
 
-  def tracking(self, dets, frame):
 
-    if len(dets) > 0:
-      dets = np.array(dets, dtype=np.float32)
-    else:
-      dets = np.empty((0, 6), dtype=np.float32)
-
-    tracks = self.tracker.update(dets, frame)
-
-    return tracks
-
-  def build_features(self, pose, tracks, objects_boxes):
+  def build_features(self, pose, objects_boxes):
 
     if pose is None or len(objects_boxes) == 0:
       return None
@@ -167,11 +167,11 @@ class ObjectDetection:
       # ---- normalize ------
       shoulder_width = (np.linalg.norm(np.array(pose["left_shoulder"]) - np.array(pose["right_shoulder"]))) 
 
-      left_wrist_distance_to_object = (np.linalg.norm(np.array(pose["left_wrist"]) - np.array(obj))) / shoulder_width
-      right_wrist_distance_to_object = (np.linalg.norm(np.array(pose["right_wrist"]) - np.array(obj))) / shoulder_width
+      left_wrist_distance_to_object = (np.linalg.norm(np.array(pose["left_wrist"]) - np.array(obj))) / (shoulder_width + 1e-6)
+      right_wrist_distance_to_object = (np.linalg.norm(np.array(pose["right_wrist"]) - np.array(obj))) / (shoulder_width + 1e-6)
 
-      left_elbow_distance_to_object = (np.linalg.norm(np.array(pose["left_elbow"])- np.array(obj))) / shoulder_width
-      right_elbow_distance_to_object = (np.linalg.norm(np.array(pose["right_elbow"]) - np.array(obj))) / shoulder_width
+      left_elbow_distance_to_object = (np.linalg.norm(np.array(pose["left_elbow"])- np.array(obj))) / (shoulder_width + 1e-6)
+      right_elbow_distance_to_object = (np.linalg.norm(np.array(pose["right_elbow"]) - np.array(obj))) / (shoulder_width + 1e-6)
 
       return (
               left_wrist_distance_to_object,
@@ -194,3 +194,4 @@ class ObjectDetection:
     cosine = np.clip(cosine, -1.0, 1.0)
 
     return np.degrees(np.arccos(cosine))
+
