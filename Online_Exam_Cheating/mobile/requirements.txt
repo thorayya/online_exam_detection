@@ -1,0 +1,22 @@
+## Python Dependencies
+
+The Mobile module requires the following Python packages:
+
+* `ultralytics`
+* `mediapipe`
+* `opencv-python`
+
+## Required Model
+
+The following MediaPipe model is required:
+
+* `hand_landmarker.task`
+
+Please download the model and place it in the project directory so that it can be accessed by the Mobile feature extraction module.
+
+## Dataset
+
+The Mobile module uses the OEP dataset.
+
+Please download the dataset separately and specify the local dataset path in the feature extraction script before running the module.
+
