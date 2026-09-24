@@ -1,4 +1,28 @@
+## Python Packages
 
-mediapipe
-ultralytics
-deepface
+Install the following packages:
+
+* `mediapipe`
+* `ultralytics`
+* `deepface`
+* `huggingface-hub`
+
+## Required Models
+
+Download the following model files:
+
+* `face_landmarker_v2_with_blendshapes.task`
+* `pose_landmarker.task`
+* `yolov8s.pt`
+* `best.pt`
+* `detector.tflite`
+
+The model files should be placed in the project directory so that they can be accessed by the corresponding feature extraction modules.
+
+The `L2CSNet_gaze360.pkl` model is downloaded automatically from Hugging Face when the feature extraction script is executed.
+
+## Dataset
+
+This module uses the **OEP dataset**, available on Kaggle.
+
+The dataset should be downloaded separately, and its local path should be provided in the feature extraction script before running the module.
