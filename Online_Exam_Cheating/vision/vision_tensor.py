@@ -963,83 +963,81 @@ print("Validation tensor:", validation_tensor.shape)
 print("Test tensor:", test_tensor.shape)
 
 
+
 # ============================================================
 # 9. Normalize features
-#    IMPORTANT: statistics are calculated only on TRAIN
+#    Min/max are calculated only from valid TRAIN timesteps
 # ============================================================
 
 def normalize_features(
     train_tensor,
     validation_tensor,
-    test_tensor
+    test_tensor,
+    train_masks,
+    validation_masks,
+    test_masks
 ):
 
-    feature_max = train_tensor.amax(
-        dim=(0, 1)
-    )
+    # True = valid timestep; False = padding
+    train_valid_mask = torch.stack(train_masks).bool()
+    validation_valid_mask = torch.stack(validation_masks).bool()
+    test_valid_mask = torch.stack(test_masks).bool()
 
-    feature_min = train_tensor.amin(
-        dim=(0, 1)
-    )
+    # Calculate statistics using valid TRAIN timesteps only
+    feature_min = torch.stack([
+        train_tensor[:, :, i][train_valid_mask].min()
+        for i in range(train_tensor.shape[2])
+    ])
+
+    feature_max = torch.stack([
+        train_tensor[:, :, i][train_valid_mask].max()
+        for i in range(train_tensor.shape[2])
+    ])
 
     normalized_features = []
     normalized_validation_features = []
     normalized_test_features = []
 
-    for i in range(
-        train_tensor.shape[2]
-    ):
+    for i in range(train_tensor.shape[2]):
 
-        # Remove:
-        # feature 8  -> face_count
-        # feature 28 -> object_class
+        print(
+            f"Feature {i}: "
+            f"min = {feature_min[i].item():.4f}, "
+            f"max = {feature_max[i].item():.4f}"
+        )
 
+        # Remove face_count (8) and object_class (28)
         if i == 8 or i == 28:
             continue
 
-        denominator = (
-            feature_max[i]
-            - feature_min[i]
-        )
+        denominator = feature_max[i] - feature_min[i]
 
+        # Handle constant features safely
         if denominator == 0:
-
-            z = torch.zeros_like(
-                train_tensor[:, :, i]
-            )
-
-            z_validation = torch.zeros_like(
-                validation_tensor[:, :, i]
-            )
-
-            z_test = torch.zeros_like(
-                test_tensor[:, :, i]
-            )
-
+            z = torch.zeros_like(train_tensor[:, :, i])
+            z_validation = torch.zeros_like(validation_tensor[:, :, i])
+            z_test = torch.zeros_like(test_tensor[:, :, i])
         else:
-
             z = (
-                train_tensor[:, :, i]
-                - feature_min[i]
+                train_tensor[:, :, i] - feature_min[i]
             ) / denominator
 
             z_validation = (
-                validation_tensor[:, :, i]
-                - feature_min[i]
+                validation_tensor[:, :, i] - feature_min[i]
             ) / denominator
 
             z_test = (
-                test_tensor[:, :, i]
-                - feature_min[i]
+                test_tensor[:, :, i] - feature_min[i]
             ) / denominator
 
+        # Keep padding at zero after normalization
+        z = z.masked_fill(~train_valid_mask, 0)
+        z_validation = z_validation.masked_fill(~validation_valid_mask, 0)
+        z_test = z_test.masked_fill(~test_valid_mask, 0)
+
         normalized_features.append(z)
-        normalized_validation_features.append(
-            z_validation
-        )
-        normalized_test_features.append(
-            z_test
-        )
+        normalized_validation_features.append(z_validation)
+        normalized_test_features.append(z_test)
 
     normalized_features = torch.stack(
         normalized_features
@@ -1071,34 +1069,25 @@ def normalize_features(
 ) = normalize_features(
     train_tensor,
     validation_tensor,
-    test_tensor
+    test_tensor,
+    masks,
+    masks_validation,
+    masks_test
 )
 
 
-print(
-    "Normalized train shape:",
-    normalized_features.shape
-)
+print("Normalized train shape:", normalized_features.shape)
+print("Normalized validation shape:", normalized_validation_features.shape)
+print("Normalized test shape:", normalized_test_features.shape)
 
-print(
-    "Normalized validation shape:",
-    normalized_validation_features.shape
-)
+print("Train min:", normalized_features.min().item())
+print("Train max:", normalized_features.max().item())
 
-print(
-    "Normalized test shape:",
-    normalized_test_features.shape
-)
+print("Validation min:", normalized_validation_features.min().item())
+print("Validation max:", normalized_validation_features.max().item())
 
-print(
-    "Train min:",
-    normalized_features.min().item()
-)
-
-print(
-    "Train max:",
-    normalized_features.max().item()
-)
+print("Test min:", normalized_test_features.min().item())
+print("Test max:", normalized_test_features.max().item())
 
 
 # ============================================================
