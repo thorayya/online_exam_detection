@@ -1,4 +1,3 @@
-
 # ============================================================
 # 1. Imports and configuration
 # ============================================================
@@ -10,33 +9,39 @@ import pickle
 import pandas as pd
 import torch
 from torch import nn, optim
-
 from google.colab import drive
 
 
-MOBILE_PATH = ""
-PROJECT_PATH = ""
+MOBILE_PATH = "/content/drive/MyDrive/Online_Exam_Cheating/mobile"
+PROJECT_PATH = "/content/drive/MyDrive/Online_Exam_Cheating"
 
 HIDDEN_SIZE = 512
 NUM_LAYERS = 3
 DROPOUT = 0.5
 EPOCHS = 100
+LEARNING_RATE = 0.001
 
 WINDOW_SIZE = 10
 STRIDE = 8
 BATCH_SIZE = 32
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+FEATURE_DIM = 8
+MODEL_INPUT_DIM = 7
+
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
 
 # ============================================================
-# 2. Setup environment
+# 2. Setup
 # ============================================================
 
 def setup_environment():
     drive.mount("/content/drive")
 
-    sys.path.append(MOBILE_PATH)
+    if MOBILE_PATH not in sys.path:
+        sys.path.append(MOBILE_PATH)
 
     if PROJECT_PATH not in sys.path:
         sys.path.append(PROJECT_PATH)
@@ -48,17 +53,53 @@ def setup_environment():
 
 def load_pkl_files():
     paths = []
-
-    # Keep the original file ordering behavior unchanged.
-    for path in os.listdir(MOBILE_PATH):
-        if path.endswith("pkl"):
-            paths.append(path)
-
     datas = []
 
-    for i in range(len(paths)):
-        with open(f"{MOBILE_PATH}/{paths[i]}", "rb") as f:
-            datas.append(pickle.load(f))
+    if not os.path.isdir(MOBILE_PATH):
+        raise FileNotFoundError(
+            f"MOBILE_PATH does not exist: {MOBILE_PATH}"
+        )
+
+    # Preserve the original directory-order behavior.
+    # The resulting index-to-file mapping is printed below.
+    for filename in os.listdir(MOBILE_PATH):
+        if not filename.endswith(".pkl"):
+            continue
+
+        filepath = os.path.join(MOBILE_PATH, filename)
+
+        with open(filepath, "rb") as f:
+            data = pickle.load(f)
+
+        # This pipeline expects one record per timestep,
+        # with an "objects" field in each record.
+        if (
+            not isinstance(data, list)
+            or len(data) == 0
+            or not isinstance(data[0], dict)
+            or "objects" not in data[0]
+        ):
+            print(
+                f"SKIPPED unsupported PKL schema: {filename}"
+            )
+            continue
+
+        paths.append(filename)
+        datas.append(data)
+
+    if not datas:
+        raise ValueError(
+            "No compatible PKL files were found. "
+            "Expected a list of timestep records containing "
+            "an 'objects' field."
+        )
+
+    print("\nVideo index -> PKL filename")
+
+    for i, filename in enumerate(paths):
+        print(i, "->", filename)
+
+    print("\nNumber of compatible videos:", len(datas))
 
     return paths, datas
 
@@ -67,145 +108,96 @@ def load_pkl_files():
 # 4. Extract mobile features
 # ============================================================
 
-def extract_features(datas):
+def extract_features(paths, datas):
     all_features = []
 
-    for data in range(len(datas)):
-        frames = datas[data]
+    feature_keys = [
+        "distance_wrist_left",
+        "distance_wrist_right",
+        "distance_finger_tip_left",
+        "distance_finger_tip_right",
+        "distance_thumb_tip_left",
+        "distance_thumb_tip_right",
+        "conf",
+        "class_id",
+    ]
 
-        distance_wrist_right = []
-        distance_wrist_left = []
+    for filename, records in zip(paths, datas):
 
-        distance_finger_tip_right = []
-        distance_finger_tip_left = []
-
-        distance_thumb_tip_right = []
-        distance_thumb_tip_left = []
-
-        conf = []
-        name = []
-        class_id = []
-
-        features = {
-            "video_id": frames[0]["video"],
-            "tensor": [],
-            "name": name
+        feature_values = {
+            key: [] for key in feature_keys
         }
 
-        for j in range(len(frames)):
-            objects = frames[j]["objects"]
+        names = []
 
-            if objects is None or len(objects) == 0:
-                distance_wrist_left.append(0)
-                distance_wrist_right.append(0)
+        for frame_index, record in enumerate(records):
 
-                distance_finger_tip_left.append(0)
-                distance_finger_tip_right.append(0)
+            objects = record.get("objects")
 
-                distance_thumb_tip_left.append(0)
-                distance_thumb_tip_right.append(0)
+            if not objects:
+                values = {
+                    "distance_wrist_left": 0.0,
+                    "distance_wrist_right": 0.0,
+                    "distance_finger_tip_left": 0.0,
+                    "distance_finger_tip_right": 0.0,
+                    "distance_thumb_tip_left": 0.0,
+                    "distance_thumb_tip_right": 0.0,
+                    "conf": 0.0,
+                    "class_id": 7,
+                }
 
-                conf.append(0)
-                class_id.append(7)
-                name.append("unknown")
+                object_name = "unknown"
 
             else:
                 best_object = max(
                     objects,
-                    key=lambda obj: obj["conf"]
+                    key=lambda obj: (
+                        obj.get("conf")
+                        if obj.get("conf") is not None
+                        else 0.0
+                    )
                 )
 
-                distance_wrist_left.append(
-                    best_object["distance_wrist_left"]
-                    if best_object["distance_wrist_left"] is not None
-                    else 0
+                values = {}
+
+                for key in feature_keys:
+                    value = best_object.get(key)
+
+                    if value is None:
+                        value = 7 if key == "class_id" else 0.0
+
+                    values[key] = value
+
+                object_name = (
+                    best_object.get("name") or "unknown"
                 )
 
-                distance_wrist_right.append(
-                    best_object["distance_wrist_right"]
-                    if best_object["distance_wrist_right"] is not None
-                    else 0
+            for key in feature_keys:
+                feature_values[key].append(
+                    float(feature_values_value(values[key]))
                 )
 
-                distance_finger_tip_left.append(
-                    best_object["distance_finger_tip_left"]
-                    if best_object["distance_finger_tip_left"] is not None
-                    else 0
-                )
+            names.append(object_name)
 
-                distance_finger_tip_right.append(
-                    best_object["distance_finger_tip_right"]
-                    if best_object["distance_finger_tip_right"] is not None
-                    else 0
-                )
+        tensors = {
+            key: torch.tensor(
+                values,
+                dtype=torch.float32
+            )
+            for key, values in feature_values.items()
+        }
 
-                distance_thumb_tip_left.append(
-                    best_object["distance_thumb_tip_left"]
-                    if best_object["distance_thumb_tip_left"] is not None
-                    else 0
-                )
-
-                distance_thumb_tip_right.append(
-                    best_object["distance_thumb_tip_right"]
-                    if best_object["distance_thumb_tip_right"] is not None
-                    else 0
-                )
-
-                conf.append(
-                    best_object["conf"]
-                    if best_object["conf"] is not None
-                    else 0
-                )
-
-                class_id.append(
-                    best_object["class_id"]
-                    if best_object["class_id"] is not None
-                    else 7
-                )
-
-                name.append(
-                    best_object["name"]
-                    if best_object["name"] is not None
-                    else "unknown"
-                )
-
-        distance_wrist_left = torch.tensor(distance_wrist_left)
-        distance_wrist_right = torch.tensor(distance_wrist_right)
-
-        distance_finger_tip_left = torch.tensor(
-            distance_finger_tip_left
-        )
-        distance_finger_tip_right = torch.tensor(
-            distance_finger_tip_right
-        )
-
-        distance_thumb_tip_left = torch.tensor(
-            distance_thumb_tip_left
-        )
-        distance_thumb_tip_right = torch.tensor(
-            distance_thumb_tip_right
-        )
-
-        conf = torch.tensor(conf)
-        class_id = torch.tensor(class_id)
-
-        features["tensor"].append(distance_wrist_left)
-        features["tensor"].append(distance_wrist_right)
-
-        features["tensor"].append(distance_finger_tip_left)
-        features["tensor"].append(distance_finger_tip_right)
-
-        features["tensor"].append(distance_thumb_tip_left)
-        features["tensor"].append(distance_thumb_tip_right)
-
-        features["tensor"].append(conf)
-        features["tensor"].append(class_id)
-
-        features["name"] = name
-
-        all_features.append(features)
+        all_features.append({
+            "video_id": filename,
+            "tensor": tensors,
+            "name": names,
+        })
 
     return all_features
+
+
+def feature_values_value(value):
+    return value
 
 
 # ============================================================
@@ -215,31 +207,39 @@ def extract_features(datas):
 def group_features(all_features):
     grouped_features = []
 
-    for i in range(len(all_features)):
+    for video in all_features:
+        tensors = video["tensor"]
+
         wrist = torch.stack(
-            all_features[i]["tensor"][0:2],
+            [
+                tensors["distance_wrist_left"],
+                tensors["distance_wrist_right"],
+            ],
             dim=1
         )
 
         finger = torch.stack(
-            all_features[i]["tensor"][2:4],
+            [
+                tensors["distance_finger_tip_left"],
+                tensors["distance_finger_tip_right"],
+            ],
             dim=1
         )
 
         thumb = torch.stack(
-            all_features[i]["tensor"][4:6],
+            [
+                tensors["distance_thumb_tip_left"],
+                tensors["distance_thumb_tip_right"],
+            ],
             dim=1
         )
-
-        conf = all_features[i]["tensor"][6]
-        class_id = all_features[i]["tensor"][7]
 
         grouped_features.append({
             "wrist": wrist,
             "finger": finger,
             "thumb": thumb,
-            "conf": conf,
-            "class_id": class_id
+            "conf": tensors["conf"],
+            "class_id": tensors["class_id"],
         })
 
     return grouped_features
@@ -249,353 +249,247 @@ def group_features(all_features):
 # 6. Build video representations
 # ============================================================
 
-def build_video_representations(all_features, grouped_features):
+def build_video_representations(
+    all_features,
+    grouped_features
+):
     all_video_representations = []
 
-    for i in range(len(all_features)):
-        distance_wrist_left = grouped_features[i]["wrist"][:, 0]
-        distance_wrist_right = grouped_features[i]["wrist"][:, 1]
-
-        distance_finger_tip_left = grouped_features[i]["finger"][:, 0]
-        distance_finger_tip_right = grouped_features[i]["finger"][:, 1]
-
-        distance_thumb_tip_left = grouped_features[i]["thumb"][:, 0]
-        distance_thumb_tip_right = grouped_features[i]["thumb"][:, 1]
-
-        conf = grouped_features[i]["conf"]
-        class_id = grouped_features[i]["class_id"]
-
+    for features, grouped in zip(
+        all_features,
+        grouped_features
+    ):
         T = torch.stack(
             [
-                distance_wrist_left,
-                distance_wrist_right,
-                distance_finger_tip_left,
-                distance_finger_tip_right,
-                distance_thumb_tip_left,
-                distance_thumb_tip_right,
-                conf,
-                class_id
+                grouped["wrist"][:, 0],
+                grouped["wrist"][:, 1],
+                grouped["finger"][:, 0],
+                grouped["finger"][:, 1],
+                grouped["thumb"][:, 0],
+                grouped["thumb"][:, 1],
+                grouped["conf"],
+                grouped["class_id"],
             ],
             dim=1
         )
 
+        if T.shape[1] != FEATURE_DIM:
+            raise ValueError(
+                f"Unexpected feature dimension: {T.shape}"
+            )
+
         all_video_representations.append(T)
 
-    print(len(all_video_representations))
+        print(
+            features["video_id"],
+            "->",
+            tuple(T.shape)
+        )
 
     return all_video_representations
 
 
 # ============================================================
-# 7. Split videos into train, validation and test
+# 7. Split videos
 # ============================================================
 
 def split_videos(all_video_representations):
+    required_indices = [2, 3, 22, 6, 4, 5, 7, 8]
+
+    if max(required_indices) >= len(
+        all_video_representations
+    ):
+        raise ValueError(
+            f"The split requires at least "
+            f"{max(required_indices) + 1} compatible videos, "
+            f"but only {len(all_video_representations)} "
+            f"were loaded. Check the PKL files and their order."
+        )
+
+    validation_indices = [2, 3, 22, 6]
+    test_indices = [4, 5, 7, 8]
+
+    excluded_indices = set(
+        validation_indices + test_indices
+    )
+
     all_video_representations_validation = [
-        all_video_representations[2],
-        all_video_representations[3],
-        all_video_representations[22],
-        all_video_representations[6]
+        all_video_representations[i]
+        for i in validation_indices
     ]
 
     all_video_representations_test = [
-        all_video_representations[4],
-        all_video_representations[5],
-        all_video_representations[7],
-        all_video_representations[8]
+        all_video_representations[i]
+        for i in test_indices
     ]
 
-    all_video_representations = (
-        all_video_representations[:2]
-        + all_video_representations[9:22]
-        + all_video_representations[23:]
+    all_video_representations_train = [
+        video
+        for i, video in enumerate(
+            all_video_representations
+        )
+        if i not in excluded_indices
+    ]
+
+    print("\nValidation video lengths:")
+    for i, video in enumerate(
+        all_video_representations_validation
+    ):
+        print(i, video.shape[0])
+
+    print("\nTest video lengths:")
+    for i, video in enumerate(
+        all_video_representations_test
+    ):
+        print(i, video.shape[0])
+
+    print(
+        "\nTraining videos:",
+        len(all_video_representations_train)
     )
 
-    print(len(all_video_representations_validation))
-
-    for i, video in enumerate(all_video_representations_validation):
-        print(i, video.shape)
-
-    print(len(all_video_representations_test))
-    print(len(all_video_representations))
-
     return (
-        all_video_representations,
+        all_video_representations_train,
         all_video_representations_validation,
         all_video_representations_test
     )
 
 
 # ============================================================
-# 8. Create validation windows
+# 8. Create windows and masks
 # ============================================================
 
-def create_validation_windows(
-    all_video_representations_validation
-):
-    windows_validation = []
-    window_validation = WINDOW_SIZE
-    stride_validation = STRIDE
-
-    masks_validation = []
-    video_index = []
-
-    for i, video in enumerate(all_video_representations_validation):
-        for j in range(0, video.shape[0], stride_validation):
-            current_window = video[j:j + window_validation]
-
-            if current_window.shape[0] == WINDOW_SIZE:
-                windows_validation.append(current_window)
-
-                mask = torch.ones(current_window.shape[0])
-                masks_validation.append(mask)
-
-            if current_window.shape[0] < WINDOW_SIZE:
-                padding_length = window_validation - (
-                    video.shape[0] - j
-                )
-
-                padding = torch.zeros(padding_length, 8)
-
-                mask = torch.ones(current_window.shape[0])
-                mask_padding = torch.zeros(padding_length)
-
-                ending_window_validation = torch.cat(
-                    [current_window, padding],
-                    dim=0
-                )
-
-                ending_mask_validation = torch.cat(
-                    [mask, mask_padding],
-                    dim=0
-                )
-
-                masks_validation.append(ending_mask_validation)
-                windows_validation.append(ending_window_validation)
-
-                for k in range(len(ending_mask_validation)):
-                    if ending_mask_validation[k] == 0:
-                        video_index.append(
-                            (len(windows_validation) - 1, i, k + j)
-                        )
-                        break
-
-    window = torch.stack(windows_validation)
-
-    return windows_validation, masks_validation, video_index
-
-
-# ============================================================
-# 9. Create test windows
-# ============================================================
-
-def create_test_windows(all_video_representations_test):
-    windows_test = []
-    masks_test = []
-
-    window_test = WINDOW_SIZE
-    stride_test = STRIDE
-
-    for video in all_video_representations_test:
-        for j in range(0, video.shape[0], stride_test):
-            current_window = video[j:j + window_test]
-
-            # Full window
-            if current_window.shape[0] == window_test:
-                windows_test.append(current_window)
-
-                mask = torch.ones(window_test)
-                masks_test.append(mask)
-
-            # Final incomplete window
-            elif (
-                current_window.shape[0] < window_test
-                and current_window.shape[0] > 0
-            ):
-                padding_length = window_test - current_window.shape[0]
-
-                padding = torch.zeros(padding_length, 8)
-
-                ending_window_test = torch.cat(
-                    [current_window, padding],
-                    dim=0
-                )
-
-                mask = torch.ones(current_window.shape[0])
-                mask_padding_test = torch.zeros(padding_length)
-
-                ending_mask_test = torch.cat(
-                    [mask, mask_padding_test],
-                    dim=0
-                )
-
-                windows_test.append(ending_window_test)
-                masks_test.append(ending_mask_test)
-
-    return windows_test, masks_test
-
-
-# ============================================================
-# 10. Create training windows
-# ============================================================
-
-def create_training_windows(all_video_representations):
+def create_windows(videos):
     windows = []
-    window = WINDOW_SIZE
-    stride = STRIDE
     masks = []
+    window_map = []
 
-    for i, video in enumerate(all_video_representations):
-        for j in range(0, video.shape[0], stride):
-            current_window = video[j:j + window]
+    for video_index, video in enumerate(videos):
+        video_length = video.shape[0]
 
-            if current_window.shape[0] == WINDOW_SIZE:
-                windows.append(current_window)
+        for start in range(0, video_length, STRIDE):
+            current_window = video[
+                start:start + WINDOW_SIZE
+            ]
 
-                mask = torch.ones(current_window.shape[0])
-                masks.append(mask)
+            valid_length = current_window.shape[0]
 
-            if current_window.shape[0] < WINDOW_SIZE:
-                padding_length = window - (video.shape[0] - j)
+            if valid_length == 0:
+                continue
 
-                padding = torch.zeros(padding_length, 8)
+            if valid_length < WINDOW_SIZE:
+                padding_length = WINDOW_SIZE - valid_length
 
-                mask = torch.ones(current_window.shape[0])
-                mask_padding = torch.zeros(padding_length)
+                padding = torch.zeros(
+                    padding_length,
+                    video.shape[1],
+                    dtype=video.dtype
+                )
 
-                ending_window = torch.cat(
+                current_window = torch.cat(
                     [current_window, padding],
                     dim=0
                 )
 
-                ending_mask = torch.cat(
-                    [mask, mask_padding],
-                    dim=0
-                )
+            mask = torch.cat([
+                torch.ones(valid_length),
+                torch.zeros(WINDOW_SIZE - valid_length)
+            ])
 
-                masks.append(ending_mask)
-                windows.append(ending_window)
+            windows.append(current_window)
+            masks.append(mask)
 
-    print(len(windows))
-    print(len(windows))
-    print(windows[0].shape)
+            # Original video index and starting timestep.
+            window_map.append((video_index, start))
 
-    return windows, masks
+    if not windows:
+        raise ValueError("No windows were created.")
+
+    windows_tensor = torch.stack(windows)
+    masks_tensor = torch.stack(masks)
+
+    assert windows_tensor.shape[:2] == masks_tensor.shape
+
+    return windows_tensor, masks_tensor, window_map
 
 
 # ============================================================
-# 11. Normalize features
+# 9. Normalize features
 # ============================================================
 
 def normalize_features(
-    windows,
-    windows_validation,
-    windows_test
+    train_tensor,
+    validation_tensor,
+    test_tensor
 ):
-    train_tensor = torch.stack(windows)
-    validation_tensor = torch.stack(windows_validation)
-    test_tensor = torch.stack(windows_test)
+    if train_tensor.shape[-1] != FEATURE_DIM:
+        raise ValueError("Unexpected training feature dimension.")
 
-    normalized_features = []
-    normalized_validation_features = []
-    normalized_test_features = []
+    # Feature index 7 is class_id and is excluded from the model.
+    feature_indices = list(range(7))
 
-    feature_max = train_tensor.amax(dim=(0, 1))
-    feature_min = train_tensor.amin(dim=(0, 1))
+    train_min = train_tensor.amin(dim=(0, 1))
+    train_max = train_tensor.amax(dim=(0, 1))
 
-    for i in range(8):
-        print(
-            f"Feature {i}: "
-            f"max = {feature_max[i].item():.4f}, "
-            f"min = {feature_min[i].item():.4f}"
+    normalized = []
+
+    for tensor in [
+        train_tensor,
+        validation_tensor,
+        test_tensor
+    ]:
+        selected = tensor[:, :, feature_indices]
+
+        selected_min = train_min[feature_indices]
+        selected_max = train_max[feature_indices]
+
+        denominator = selected_max - selected_min
+
+        safe_denominator = torch.where(
+            denominator == 0,
+            torch.ones_like(denominator),
+            denominator
         )
 
-        if i == 7:
-            continue
+        result = (
+            selected - selected_min
+        ) / safe_denominator
 
-        denominator = feature_max[i] - feature_min[i]
+        # Avoid invalid values for constant features.
+        constant_features = denominator == 0
 
-        if denominator == 0:
-            z = torch.zeros_like(train_tensor[:, :, i])
+        result[:, :, constant_features] = 0.0
 
-            z_validation = torch.zeros_like(
-                validation_tensor[:, :, i]
-            )
+        normalized.append(result)
 
-            z_test = torch.zeros_like(test_tensor[:, :, i])
-
-        else:
-            z = (
-                train_tensor[:, :, i] - feature_min[i]
-            ) / denominator
-
-            z_validation = (
-                validation_tensor[:, :, i] - feature_min[i]
-            ) / denominator
-
-            z_test = (
-                test_tensor[:, :, i] - feature_min[i]
-            ) / denominator
-
-        normalized_features.append(z)
-        normalized_validation_features.append(z_validation)
-        normalized_test_features.append(z_test)
-
-    normalized_features = torch.stack(normalized_features)
-    normalized_validation_features = torch.stack(
-        normalized_validation_features
-    )
-    normalized_test_features = torch.stack(
-        normalized_test_features
+    train_normalized, validation_normalized, test_normalized = (
+        normalized
     )
 
-    normalized_features = normalized_features.permute(1, 2, 0)
-
-    normalized_validation_features = (
-        normalized_validation_features.permute(1, 2, 0)
-    )
-
-    normalized_test_features = normalized_test_features.permute(
-        1, 2, 0
-    )
-
-    print(normalized_features.min().item())
-    print(normalized_features.max().item())
-
-    print(
-        f" valid min: "
-        f"{normalized_validation_features.min().item()}"
-    )
-    print(
-        f" valid max: "
-        f"{normalized_validation_features.max().item()}"
-    )
-    print(normalized_validation_features.shape)
-
-    print(
-        f" test min: "
-        f"{normalized_test_features.min().item()}"
-    )
-    print(
-        f" test max: "
-        f"{normalized_test_features.max().item()}"
-    )
-    print(normalized_test_features.shape)
+    print("\nNormalized tensor shapes:")
+    print("Train:", tuple(train_normalized.shape))
+    print("Validation:", tuple(validation_normalized.shape))
+    print("Test:", tuple(test_normalized.shape))
 
     return (
-        normalized_features,
-        normalized_validation_features,
-        normalized_test_features
+        train_normalized,
+        validation_normalized,
+        test_normalized
     )
 
 
 # ============================================================
-# 12. Dataset class
+# 10. Dataset and DataLoaders
 # ============================================================
 
 class SequenceDataset(torch.utils.data.Dataset):
 
     def __init__(self, windows, masks):
+        if len(windows) != len(masks):
+            raise ValueError(
+                "Window and mask counts do not match."
+            )
+
         self.windows = windows
         self.masks = masks
 
@@ -606,21 +500,27 @@ class SequenceDataset(torch.utils.data.Dataset):
         return self.windows[idx], self.masks[idx]
 
 
-# ============================================================
-# 13. Create DataLoaders
-# ============================================================
-
 def create_data_loaders(
-    normalized_features,
-    normalized_validation_features,
-    normalized_test_features,
-    masks,
-    masks_validation,
-    masks_test
+    train_tensor,
+    validation_tensor,
+    test_tensor,
+    train_masks,
+    validation_masks,
+    test_masks
 ):
     train_dataset = SequenceDataset(
-        normalized_features,
-        masks
+        train_tensor,
+        train_masks
+    )
+
+    validation_dataset = SequenceDataset(
+        validation_tensor,
+        validation_masks
+    )
+
+    test_dataset = SequenceDataset(
+        test_tensor,
+        test_masks
     )
 
     train_loader = torch.utils.data.DataLoader(
@@ -629,20 +529,10 @@ def create_data_loaders(
         shuffle=True
     )
 
-    validatation_dataset = SequenceDataset(
-        normalized_validation_features,
-        masks_validation
-    )
-
-    validatation_loader = torch.utils.data.DataLoader(
-        validatation_dataset,
+    validation_loader = torch.utils.data.DataLoader(
+        validation_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False
-    )
-
-    test_dataset = SequenceDataset(
-        normalized_test_features,
-        masks_test
     )
 
     test_loader = torch.utils.data.DataLoader(
@@ -651,11 +541,11 @@ def create_data_loaders(
         shuffle=False
     )
 
-    return train_loader, validatation_loader, test_loader
+    return train_loader, validation_loader, test_loader
 
 
 # ============================================================
-# 14. Build the GRU model
+# 11. Build model
 # ============================================================
 
 def build_model(input_dim):
@@ -668,19 +558,19 @@ def build_model(input_dim):
         dropout=DROPOUT
     ).to(device)
 
-    optimizer = torch.optim.Adam(
+    optimizer = optim.Adam(
         model.parameters(),
-        lr=0.001
+        lr=LEARNING_RATE
     )
 
     return model, optimizer
 
 
 # ============================================================
-# 15. Train the model
+# 12. Train model
 # ============================================================
 
-def train_model(model, optimizer, train_loader, input_dim):
+def train_model(model, optimizer, train_loader):
     epoch_losses = []
 
     for epoch in range(EPOCHS):
@@ -689,9 +579,7 @@ def train_model(model, optimizer, train_loader, input_dim):
 
         for batch_windows, batch_masks in train_loader:
             batch_windows = batch_windows.to(device)
-            batch_masks = batch_masks.to(device)
-
-            batch_masks = batch_masks.unsqueeze(-1)
+            batch_masks = batch_masks.to(device).unsqueeze(-1)
 
             batch_size = batch_windows.shape[0]
 
@@ -704,14 +592,23 @@ def train_model(model, optimizer, train_loader, input_dim):
 
             optimizer.zero_grad()
 
-            reconstruction, _ = model(batch_windows, h0)
-
-            error = (batch_windows - reconstruction) ** 2
-            masked_error = error * batch_masks
-
-            loss = masked_error.sum() / (
-                batch_masks.sum() * input_dim
+            reconstruction, _ = model(
+                batch_windows,
+                h0
             )
+
+            squared_error = (
+                batch_windows - reconstruction
+            ) ** 2
+
+            masked_error = squared_error * batch_masks
+
+            denominator = (
+                batch_masks.sum()
+                * batch_windows.shape[-1]
+            ).clamp_min(1)
+
+            loss = masked_error.sum() / denominator
 
             loss.backward()
             optimizer.step()
@@ -722,133 +619,34 @@ def train_model(model, optimizer, train_loader, input_dim):
         epoch_losses.append(epoch_loss)
 
         print(
-            f"Epoch {epoch + 1}/{EPOCHS} - "
-            f"Loss: {epoch_loss:.6f}"
+            f"Epoch {epoch + 1}/{EPOCHS} "
+            f"- Loss: {epoch_loss:.6f}"
         )
 
-    return epoch_losses, batch_windows, batch_masks, h0
+    return epoch_losses
 
 
 # ============================================================
-# 16. Run batch diagnostics
+# 13. Calculate window and timestep errors
 # ============================================================
 
-def run_batch_diagnostics(
-    model,
-    batch_windows,
-    batch_masks,
-    h0,
-    validatation_loader,
-    test_loader
-):
-    print("batch_windows:", batch_windows.shape)
-    print("batch_masks:", batch_masks.shape)
-    print("h0:", h0.shape)
-
-    reconstruction, _ = model(batch_windows, h0)
-
-    error = (batch_windows - reconstruction) ** 2
-    masked_error = error * batch_masks
-
-    loss = torch.sum(masked_error) / (
-        torch.sum(batch_masks) * batch_windows.shape[-1]
-    )
-
-    # Validation batch
-    (
-        batch_windows_validation,
-        batch_masks_validation
-    ) = next(iter(validatation_loader))
-
-    batch_windows_validation = batch_windows_validation.to(device)
-    batch_masks_validation = batch_masks_validation.to(device)
-
-    batch_masks_validation = batch_masks_validation.unsqueeze(-1)
-
-    h0_validation = torch.zeros(
-        NUM_LAYERS,
-        batch_windows_validation.shape[0],
-        HIDDEN_SIZE,
-        device=device
-    )
-
-    reconstruction_validation, _ = model(
-        batch_windows_validation,
-        h0_validation
-    )
-
-    error_validation = (
-        batch_windows_validation - reconstruction_validation
-    ) ** 2
-
-    masked_error_validation = error_validation * batch_masks_validation
-
-    loss_validation = torch.sum(masked_error_validation) / (
-        torch.sum(batch_masks_validation)
-        * batch_windows_validation.shape[-1]
-    )
-
-    # Test batch
-    batch_windows_test, batch_masks_test = next(iter(test_loader))
-
-    batch_windows_test = batch_windows_test.to(device)
-    batch_masks_test = batch_masks_test.to(device)
-
-    batch_masks_test = batch_masks_test.unsqueeze(-1)
-
-    h0_test = torch.zeros(
-        NUM_LAYERS,
-        batch_windows_test.shape[0],
-        HIDDEN_SIZE,
-        device=device
-    )
-
-    reconstruction_test, _ = model(
-        batch_windows_test,
-        h0_test
-    )
-
-    error_test = (batch_windows_test - reconstruction_test) ** 2
-    masked_error_test = error_test * batch_masks_test
-
-    loss_test = torch.sum(masked_error_test) / (
-        torch.sum(batch_masks_test)
-        * batch_windows_test.shape[-1]
-    )
-
-    return loss, loss_validation, loss_test
-
-
-# ============================================================
-# 17. Calculate validation errors
-# ============================================================
-
-def calculate_validation_errors(model, validatation_loader):
+def calculate_errors(model, loader):
     model.eval()
 
-    batch_losses = []
-    validation_errors = []
-    timestep_error = []
+    window_errors = []
+    timestep_errors = []
+    all_masks = []
+    total_squared_error = 0.0
+    total_valid_values = 0.0
 
     with torch.no_grad():
-        for (
-            batch_windows_validation,
-            batch_masks_validation
-        ) in validatation_loader:
+        for windows, masks in loader:
+            windows = windows.to(device)
+            masks = masks.to(device)
 
-            batch_windows_validation = (
-                batch_windows_validation.to(device)
-            )
+            expanded_masks = masks.unsqueeze(-1)
 
-            batch_masks_validation = (
-                batch_masks_validation.to(device)
-            )
-
-            batch_masks_validation = (
-                batch_masks_validation.unsqueeze(-1)
-            )
-
-            batch_size = batch_windows_validation.shape[0]
+            batch_size = windows.shape[0]
 
             h0 = torch.zeros(
                 NUM_LAYERS,
@@ -857,318 +655,119 @@ def calculate_validation_errors(model, validatation_loader):
                 device=device
             )
 
-            reconstruction_validation, _ = model(
-                batch_windows_validation,
-                h0
-            )
+            reconstruction, _ = model(windows, h0)
 
-            error_validation = (
-                batch_windows_validation - reconstruction_validation
+            squared_error = (
+                windows - reconstruction
             ) ** 2
 
-            masked_error_validation = (
-                error_validation * batch_masks_validation
+            masked_error = squared_error * expanded_masks
+
+            # One error for every timestep in each window.
+            per_timestep_error = masked_error.mean(dim=2)
+
+            timestep_errors.append(
+                per_timestep_error.cpu()
             )
 
-            timestep_error.append(
-                masked_error_validation.mean(dim=2)
+            all_masks.append(masks.cpu())
+
+            valid_steps = masks.sum(dim=1)
+
+            denominator = (
+                valid_steps * windows.shape[-1]
+            ).clamp_min(1)
+
+            per_window_error = (
+                masked_error.sum(dim=(1, 2))
+                / denominator
             )
 
-            window_error = (
-                torch.sum(masked_error_validation, dim=(1, 2))
-                / (
-                    torch.sum(batch_masks_validation, dim=(1, 2))
-                    * batch_windows_validation.shape[-1]
-                )
+            window_errors.extend(
+                per_window_error.cpu().tolist()
             )
 
-            loss_validation = (
-                torch.sum(masked_error_validation)
-                / (
-                    torch.sum(batch_masks_validation)
-                    * batch_windows_validation.shape[-1]
-                )
+            total_squared_error += masked_error.sum().item()
+
+            total_valid_values += (
+                masks.sum().item() * windows.shape[-1]
             )
 
-            batch_losses.append(loss_validation.item())
-
-            validation_errors.extend(
-                window_error.cpu().tolist()
-            )
-
-    timestep_errors_validation = torch.cat(
-        timestep_error,
+    timestep_errors = torch.cat(
+        timestep_errors,
         dim=0
     )
 
-    print(timestep_errors_validation.shape)
-    print("Number of validation windows:", len(validation_errors))
-    print("Validation Loss:", sum(batch_losses) / len(batch_losses))
+    all_masks = torch.cat(all_masks, dim=0)
 
-    return validation_errors, timestep_errors_validation
-
-
-# ============================================================
-# 18. Calculate test errors
-# ============================================================
-
-def calculate_test_errors(model, test_loader):
-    test_errors = []
-
-    model.eval()
-
-    with torch.no_grad():
-        for batch_windows_test, batch_masks_test in test_loader:
-            batch_windows_test = batch_windows_test.to(device)
-            batch_masks_test = batch_masks_test.to(device)
-
-            batch_masks_test = batch_masks_test.unsqueeze(-1)
-
-            batch_size = batch_windows_test.shape[0]
-
-            h0 = torch.zeros(
-                NUM_LAYERS,
-                batch_size,
-                HIDDEN_SIZE,
-                device=device
-            )
-
-            reconstruction_test, _ = model(
-                batch_windows_test,
-                h0
-            )
-
-            error_test = (
-                batch_windows_test - reconstruction_test
-            ) ** 2
-
-            masked_error_test = error_test * batch_masks_test
-
-            window_error = (
-                torch.sum(masked_error_test, dim=(1, 2))
-                / (
-                    torch.sum(batch_masks_test, dim=(1, 2))
-                    * batch_windows_test.shape[-1]
-                )
-            )
-
-            test_errors.extend(window_error.cpu().tolist())
-
-    for i, error in enumerate(test_errors):
-        print(f"Window {i}: Reconstruction Error = {error:.6f}")
-
-    return test_errors
-
-
-# ============================================================
-# 19. Create labels
-# ============================================================
-
-def create_labels():
-    Normal = 0
-
-    cheating_types = {
-        1: "Book / Note / Paper",
-        2: "Using a Phone"
-    }
-
-    labels_first = [0] * 1054
-    labels_second = [0] * 1365
-    labels_third = [0] * 1060
-    labels_forth = [0] * 1161
-
-    label_ranges_first = []
-    label_ranges_second = []
-
-    label_ranges_third = [
-        (47, 64, 1),
-        (246, 258, 1),
-        (388, 420, 1),
-        (423, 427, 1),
-        (476, 524, 2),
-        (687, 709, 1)
-    ]
-
-    label_ranges_forth = [
-        (514, 515, 1),
-        (516, 532, 1)
-    ]
-
-    window_labels_first = []
-    window_labels_second = []
-    window_labels_third = []
-    window_labels_forth = []
-
-    for start, end, label in label_ranges_first:
-        for i in range(start, end + 1):
-            labels_first[i] = label
-
-    for i in range(0, len(labels_first), STRIDE):
-        window_labels_first.append(labels_first[i:i + WINDOW_SIZE])
-
-    for start, end, label in label_ranges_second:
-        for i in range(start, end + 1):
-            labels_second[i] = label
-
-    for i in range(0, len(labels_second), STRIDE):
-        window_labels_second.append(labels_second[i:i + WINDOW_SIZE])
-
-    for start, end, label in label_ranges_third:
-        for i in range(start, end + 1):
-            labels_third[i] = label
-
-    for i in range(0, len(labels_third), STRIDE):
-        window_labels_third.append(labels_third[i:i + WINDOW_SIZE])
-
-    for start, end, label in label_ranges_forth:
-        for i in range(start, end + 1):
-            labels_forth[i] = label
-
-    for i in range(0, len(labels_forth), STRIDE):
-        window_labels_forth.append(labels_forth[i:i + WINDOW_SIZE])
-
-    window_labels = (
-        window_labels_first
-        + window_labels_second
-        + window_labels_third
-        + window_labels_forth
+    overall_loss = (
+        total_squared_error / max(total_valid_values, 1)
     )
 
-    windows_labels_validation = []
-    masks_labels_validation = []
-
-    for current_window in window_labels:
-        current_window = torch.tensor(current_window)
-
-        if current_window.shape[0] == WINDOW_SIZE:
-            windows_labels_validation.append(current_window)
-
-            mask = torch.ones(WINDOW_SIZE)
-            masks_labels_validation.append(mask)
-
-        else:
-            padding_length = WINDOW_SIZE - current_window.shape[0]
-
-            padding = torch.zeros(padding_length)
-
-            mask = torch.ones(current_window.shape[0])
-            mask_padding = torch.zeros(padding_length)
-
-            ending_window_labels = torch.cat(
-                [current_window, padding]
-            )
-
-            ending_mask_labels = torch.cat(
-                [mask, mask_padding]
-            )
-
-            windows_labels_validation.append(ending_window_labels)
-            masks_labels_validation.append(ending_mask_labels)
+    print("Window errors:", len(window_errors))
+    print("Timestep error shape:", tuple(timestep_errors.shape))
+    print("Masked reconstruction loss:", overall_loss)
 
     return (
-        Normal,
-        cheating_types,
-        window_labels,
-        windows_labels_validation,
-        masks_labels_validation
+        window_errors,
+        timestep_errors,
+        all_masks,
+        overall_loss
     )
 
 
-
 # ============================================================
-# 19.1. Create test labels
+# 14. Create manual labels for validation and test
 # ============================================================
 
-def create_test_labels():
-    # Test video lengths, in the same order as
-    # all_video_representations_test in split_videos().
-    labels_first_test = [0] * 736
-    labels_second_test = [0] * 928
-    labels_third_test = [0] * 942
-    labels_forth_test = [0] * 1475
+def create_label_windows(videos, label_ranges):
+    if len(videos) != len(label_ranges):
+        raise ValueError(
+            "Each video must have its own label-range list."
+        )
 
-    label_ranges_first_test = [
-        (288, 307, 1),
-        (688, 691, 1),
-        (694, 695, 1),
-    ]
+    label_windows = []
+    label_masks = []
 
-    label_ranges_second_test = [
-        (68, 71, 1),
-        (74, 81, 1),
-        (82, 83, 1),
-        (85, 87, 1),
-        (732, 735, 1),
-        (904, 906, 1),
-    ]
+    for video_index, (video, ranges) in enumerate(
+        zip(videos, label_ranges)
+    ):
+        video_length = video.shape[0]
 
-    label_ranges_third_test = [
-        (428, 432, 1),
-        (439, 441, 1),
-        (444, 445, 1),
-        (447, 450, 1),
-        (453, 454, 1),
-    ]
+        labels = torch.zeros(
+            video_length,
+            dtype=torch.long
+        )
 
-    # These timestamps were written as MMSS.
-    # Convert all of them to seconds.
-    label_ranges_forth_test = [
-        (556, 563, 1),    # 09:16–09:23
-        (565, 566, 1),    # 09:25–09:26
-        (567, 568, 1),    # 09:27–09:28
-        (577, 585, 1),    # 09:37–09:45
-        (607, 611, 1),    # 10:07–10:11
-        (612, 616, 1),    # 10:12–10:16
-        (691, 699, 1),    # 11:31–11:39
-        (1247, 1258, 1),  # 20:47–20:58
-        (1270, 1276, 1),  # 21:10–21:16
-    ]
-
-    all_test_labels = [
-        labels_first_test,
-        labels_second_test,
-        labels_third_test,
-        labels_forth_test,
-    ]
-
-    all_test_ranges = [
-        label_ranges_first_test,
-        label_ranges_second_test,
-        label_ranges_third_test,
-        label_ranges_forth_test,
-    ]
-
-    # Apply the manually assigned labels.
-    for labels, ranges in zip(all_test_labels, all_test_ranges):
         for start, end, label in ranges:
-            if start < 0 or end >= len(labels) or start > end:
+            if (
+                start < 0
+                or end < start
+                or end >= video_length
+            ):
                 raise ValueError(
-                    f"Invalid label range: {(start, end, label)} "
-                    f"for video length {len(labels)}"
+                    f"Invalid label range {(start, end, label)} "
+                    f"for video {video_index}, "
+                    f"whose actual length is {video_length}. "
+                    "Check the selected video and its manual labels."
                 )
 
-            for i in range(start, end + 1):
-                labels[i] = label
+            labels[start:end + 1] = label
 
-    # Create label windows matching create_test_windows().
-    windows_labels_test = []
-    masks_labels_test = []
+        for start in range(0, video_length, STRIDE):
+            current = labels[start:start + WINDOW_SIZE]
+            valid_length = len(current)
 
-    for labels in all_test_labels:
-        for j in range(0, len(labels), STRIDE):
-            current_window = torch.tensor(
-                labels[j:j + WINDOW_SIZE],
-                dtype=torch.long
-            )
-
-            valid_length = len(current_window)
+            if valid_length == 0:
+                continue
 
             if valid_length < WINDOW_SIZE:
-                padding_length = WINDOW_SIZE - valid_length
-
-                current_window = torch.cat([
-                    current_window,
-                    torch.zeros(padding_length, dtype=torch.long)
+                current = torch.cat([
+                    current,
+                    torch.zeros(
+                        WINDOW_SIZE - valid_length,
+                        dtype=torch.long
+                    )
                 ])
 
             mask = torch.cat([
@@ -1176,459 +775,395 @@ def create_test_labels():
                 torch.zeros(WINDOW_SIZE - valid_length)
             ])
 
-            windows_labels_test.append(current_window)
-            masks_labels_test.append(mask)
+            label_windows.append(current)
+            label_masks.append(mask)
 
-    print("Test label windows:", len(windows_labels_test))
+    if not label_windows:
+        raise ValueError("No label windows were created.")
 
-    return windows_labels_test, masks_labels_test
+    label_windows = torch.stack(label_windows)
+    label_masks = torch.stack(label_masks)
 
-
-# ============================================================
-# 19.2. Calculate timestep-level test reconstruction errors
-# ============================================================
-
-def calculate_test_timestep_errors(model, test_loader):
-    model.eval()
-    timestep_errors_test = []
-
-    with torch.no_grad():
-        for batch_windows_test, batch_masks_test in test_loader:
-            batch_windows_test = batch_windows_test.to(device)
-            batch_masks_test = batch_masks_test.to(device)
-
-            batch_masks_test = batch_masks_test.unsqueeze(-1)
-
-            batch_size = batch_windows_test.shape[0]
-
-            h0_test = torch.zeros(
-                NUM_LAYERS,
-                batch_size,
-                HIDDEN_SIZE,
-                device=device
-            )
-
-            reconstruction_test, _ = model(
-                batch_windows_test,
-                h0_test
-            )
-
-            error_test = (
-                batch_windows_test - reconstruction_test
-            ) ** 2
-
-            masked_error_test = error_test * batch_masks_test
-
-            # One reconstruction error per timestep.
-            timestep_error = masked_error_test.mean(dim=2)
-
-            timestep_errors_test.append(timestep_error.cpu())
-
-    timestep_errors_test = torch.cat(
-        timestep_errors_test,
-        dim=0
-    )
-
-    print("Timestep-level test errors:", timestep_errors_test.shape)
-
-    return timestep_errors_test
+    return label_windows, label_masks
 
 
 # ============================================================
-# 19.3. Evaluate test errors against manual labels
+# 15. Evaluate reconstruction errors by class
 # ============================================================
 
-def save_test_label_evaluation(
-    timestep_errors_test,
-    windows_labels_test,
-    masks_labels_test
+def evaluate_class_errors(
+    timestep_errors,
+    error_masks,
+    label_windows,
+    label_masks,
+    output_csv
 ):
-    errors = timestep_errors_test.flatten()
+    errors = timestep_errors.cpu()
+    error_masks = error_masks.cpu().bool()
 
-    labels = torch.stack(windows_labels_test).flatten()
-    label_masks = torch.stack(masks_labels_test).flatten().bool()
+    labels = label_windows.cpu()
+    label_masks = label_masks.cpu().bool()
 
-    # Ignore padded timesteps.
-    errors = errors[label_masks]
-    labels = labels[label_masks]
-
-    if len(errors) != len(labels):
+    if errors.shape != labels.shape:
         raise ValueError(
-            f"Mismatch between test errors ({len(errors)}) "
-            f"and test labels ({len(labels)})."
+            f"Shape mismatch: errors={tuple(errors.shape)}, "
+            f"labels={tuple(labels.shape)}"
         )
+
+    if error_masks.shape != label_masks.shape:
+        raise ValueError(
+            f"Mask shape mismatch: "
+            f"error masks={tuple(error_masks.shape)}, "
+            f"label masks={tuple(label_masks.shape)}"
+        )
+
+    if not torch.equal(error_masks, label_masks):
+        raise ValueError(
+            "Data masks and label masks are not aligned."
+        )
+
+    errors = errors.flatten()
+    labels = labels.flatten()
+    valid = error_masks.flatten()
+
+    # Exclude padded positions.
+    errors = errors[valid]
+    labels = labels[valid]
+
+    class_names = {
+        0: "Normal",
+        1: "Cheating: Book / Note / Paper",
+        2: "Cheating: Using a Phone"
+    }
 
     rows = []
 
-    for label, name in [
-        (0, "Normal"),
-        (1, "Cheating: Book / Note / Paper"),
-        (2, "Cheating: Using a Phone"),
-    ]:
+    for label, name in class_names.items():
         class_errors = errors[labels == label]
 
         rows.append({
             "Class": name,
             "Label": label,
-            "Number of timesteps": len(class_errors),
+            "Number of valid window-timesteps": len(class_errors),
             "Mean reconstruction error": (
                 class_errors.mean().item()
-                if len(class_errors) > 0 else float("nan")
+                if len(class_errors) > 0
+                else float("nan")
             ),
             "Median reconstruction error": (
                 class_errors.median().item()
-                if len(class_errors) > 0 else float("nan")
+                if len(class_errors) > 0
+                else float("nan")
             ),
             "Standard deviation": (
                 class_errors.std().item()
-                if len(class_errors) > 1 else float("nan")
+                if len(class_errors) > 1
+                else float("nan")
             ),
+            "Minimum reconstruction error": (
+                class_errors.min().item()
+                if len(class_errors) > 0
+                else float("nan")
+            ),
+            "Maximum reconstruction error": (
+                class_errors.max().item()
+                if len(class_errors) > 0
+                else float("nan")
+            )
         })
 
-    test_label_table = pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
 
-    display(test_label_table)
+    display(table)
+    table.to_csv(output_csv, index=False)
 
-    test_label_table.to_csv(
-        "mobile_test_label_evaluation.csv",
-        index=False
-    )
+    print("Saved:", output_csv)
 
-    return test_label_table
-
+    return table
 
 
 # ============================================================
-# 20. Save test summary table
+# 16. Save window-level test summary
 # ============================================================
 
 def save_test_summary(test_errors):
-    test_results = pd.DataFrame({
+    series = pd.Series(test_errors)
+
+    results = pd.DataFrame({
         "Component": [
             "Modality",
             "Model",
-            "Input",
-            "Features",
+            "Input features",
             "Window size",
-            "Output",
+            "Stride",
             "Score level",
-            "Test windows",
+            "Number of test windows",
             "Mean reconstruction error",
             "Median reconstruction error",
             "Standard deviation",
             "Minimum reconstruction error",
             "Maximum reconstruction error",
-            "Final decision"
+            "Final use"
         ],
-
         "Description": [
             "Mobile",
             "MultiLayerGRU",
-            "Mobile feature tensor",
-            "Wrist, finger-tip and thumb-tip distances",
-            "10 timesteps",
-            "Reconstruction error",
+            (
+                "Wrist, finger-tip and thumb-tip distances, "
+                "plus confidence"
+            ),
+            WINDOW_SIZE,
+            STRIDE,
             "Window-level anomaly score",
             len(test_errors),
-            pd.Series(test_errors).mean(),
-            pd.Series(test_errors).median(),
-            pd.Series(test_errors).std(),
-            pd.Series(test_errors).min(),
-            pd.Series(test_errors).max(),
-            "Used as input for multimodal fusion"
+            series.mean(),
+            series.median(),
+            series.std(),
+            series.min(),
+            series.max(),
+            "Input to multimodal fusion"
         ]
     })
 
-    display(test_results)
+    display(results)
 
-    test_results.to_csv(
+    results.to_csv(
         "mobile_test_summary_table.csv",
         index=False
     )
 
-    return test_results
+    return results
 
 
 # ============================================================
-# 21. Calculate class-wise validation errors
-# ============================================================
-
-def calculate_class_wise_errors(
-    timestep_errors_validation,
-    windows_labels_validation
-):
-    errors = timestep_errors_validation.cpu().flatten()
-
-    labels = torch.stack(
-        windows_labels_validation
-    ).flatten()
-
-    if len(errors) != len(labels):
-        raise ValueError(
-            f"Mismatch between validation errors ({len(errors)}) "
-            f"and labels ({len(labels)})."
-        )
-
-    for label, name in [(0, "Normal"), (2, "Cheating")]:
-        class_errors = errors[labels == label]
-
-        print(
-            name,
-            "N =", len(class_errors),
-            "Mean =", class_errors.mean().item(),
-            "Median =", class_errors.median().item(),
-            "Std =", class_errors.std().item(),
-            "Min =", class_errors.min().item(),
-            "Max =", class_errors.max().item()
-        )
-
-
-# ============================================================
-# 22. Save validation summary table
-# ============================================================
-
-def save_validation_summary(
-    timestep_errors_validation,
-    windows_labels_validation
-):
-    errors = timestep_errors_validation.cpu().flatten()
-
-    labels = torch.stack(
-        windows_labels_validation
-    ).flatten()
-
-    if len(errors) != len(labels):
-        raise ValueError(
-            f"Mismatch between validation errors ({len(errors)}) "
-            f"and labels ({len(labels)})."
-        )
-
-    normal_errors = errors[labels == 0]
-    cheating_errors = errors[labels == 2]
-
-    mobile_summary = {
-        "Component": [
-            "Modality",
-            "Model",
-            "Input",
-            "Features",
-            "Window size",
-            "Output",
-            "Score level",
-            "Normal timesteps",
-            "Cheating timesteps",
-            "Normal mean error",
-            "Cheating mean error",
-            "Final decision"
-        ],
-
-        "Description": [
-            "Mobile",
-            "MultiLayerGRU",
-            "Mobile feature tensor",
-            "Wrist, finger-tip and thumb-tip distances",
-            "10 timesteps",
-            "Reconstruction error",
-            "Timestep-level anomaly score",
-            len(normal_errors),
-            len(cheating_errors),
-            (
-                normal_errors.mean().item()
-                if len(normal_errors) > 0
-                else float("nan")
-            ),
-            (
-                cheating_errors.mean().item()
-                if len(cheating_errors) > 0
-                else float("nan")
-            ),
-            "Used as input for multimodal fusion"
-        ]
-    }
-
-    mobile_table = pd.DataFrame(mobile_summary)
-
-    display(mobile_table)
-
-    mobile_table.to_csv(
-        "mobile_validation_summary_table.csv",
-        index=False
-    )
-
-    return mobile_table
-
-
-# ============================================================
-# 23. Main pipeline
+# 17. Main pipeline
 # ============================================================
 
 def main():
     setup_environment()
 
-    # Load data
+    # Load
     paths, datas = load_pkl_files()
 
-    # Feature extraction
-    all_features = extract_features(datas)
+    # Extract and group features
+    all_features = extract_features(paths, datas)
 
-    # Group features
     grouped_features = group_features(all_features)
 
-    # Build video representations
     all_video_representations = build_video_representations(
         all_features,
         grouped_features
     )
 
-    # Split train, validation and test videos
+    # Split
     (
-        all_video_representations,
-        all_video_representations_validation,
-        all_video_representations_test
+        train_videos,
+        validation_videos,
+        test_videos
     ) = split_videos(all_video_representations)
 
-    # Create windows
+    # Create data windows
+    train_tensor, train_masks, _ = create_windows(train_videos)
+
+    validation_tensor, validation_masks, _ = create_windows(
+        validation_videos
+    )
+
+    test_tensor, test_masks, _ = create_windows(test_videos)
+
+    print("\nWindow counts:")
+    print("Train:", len(train_tensor), len(train_masks))
+    print(
+        "Validation:",
+        len(validation_tensor),
+        len(validation_masks)
+    )
+    print("Test:", len(test_tensor), len(test_masks))
+
+    # Normalize using training data only
     (
-        windows_validation,
-        masks_validation,
-        video_index
-    ) = create_validation_windows(
-        all_video_representations_validation
-    )
-
-    windows_test, masks_test = create_test_windows(
-        all_video_representations_test
-    )
-
-    windows, masks = create_training_windows(
-        all_video_representations
-    )
-
-    # Normalize
-    (
-        normalized_features,
-        normalized_validation_features,
-        normalized_test_features
+        train_normalized,
+        validation_normalized,
+        test_normalized
     ) = normalize_features(
-        windows,
-        windows_validation,
-        windows_test
+        train_tensor,
+        validation_tensor,
+        test_tensor
     )
 
     # DataLoaders
     (
         train_loader,
-        validatation_loader,
+        validation_loader,
         test_loader
     ) = create_data_loaders(
-        normalized_features,
-        normalized_validation_features,
-        normalized_test_features,
-        masks,
-        masks_validation,
-        masks_test
+        train_normalized,
+        validation_normalized,
+        test_normalized,
+        train_masks,
+        validation_masks,
+        test_masks
     )
 
-    # Get first training batch to determine input dimension
-    batch_windows, batch_masks = next(iter(train_loader))
+    # Model
+    model, optimizer = build_model(
+        input_dim=train_normalized.shape[-1]
+    )
 
-    batch_windows = batch_windows.to(device)
-    batch_masks = batch_masks.to(device)
-    batch_masks = batch_masks.unsqueeze(-1)
-
-    input_dim = batch_windows.shape[-1]
-
-    # Build model
-    model, optimizer = build_model(input_dim)
-
-    # Train
-    (
-        epoch_losses,
-        batch_windows,
-        batch_masks,
-        h0
-    ) = train_model(
+    # Training
+    epoch_losses = train_model(
         model,
         optimizer,
-        train_loader,
-        input_dim
-    )
-
-    # Batch diagnostics
-    (
-        loss,
-        loss_validation,
-        loss_test
-    ) = run_batch_diagnostics(
-        model,
-        batch_windows,
-        batch_masks,
-        h0,
-        validatation_loader,
-        test_loader
+        train_loader
     )
 
     # Validation errors
     (
-        validation_errors,
-        timestep_errors_validation
-    ) = calculate_validation_errors(
+        validation_window_errors,
+        validation_timestep_errors,
+        validation_error_masks,
+        validation_loss
+    ) = calculate_errors(
         model,
-        validatation_loader
+        validation_loader
     )
 
     # Test errors
-    test_errors = calculate_test_errors(
-        model,
-        test_loader
-    )
-
-    # Labels
     (
-        Normal,
-        cheating_types,
-        window_labels,
-        windows_labels_validation,
-        masks_labels_validation
-    ) = create_labels()
-
-    # Test report
-    test_results = save_test_summary(test_errors)
-
-    # Class-wise validation errors
-    calculate_class_wise_errors(
-        timestep_errors_validation,
-        windows_labels_validation
-    )
-
-    # Validation report
-    mobile_table = save_validation_summary(
-        timestep_errors_validation,
-        windows_labels_validation
-    )
-
-
-    # Test timestep-level errors
-    timestep_errors_test = calculate_test_timestep_errors(
+        test_window_errors,
+        test_timestep_errors,
+        test_error_masks,
+        test_loss
+    ) = calculate_errors(
         model,
         test_loader
     )
-    
-    # Test labels
-    windows_labels_test, masks_labels_test = create_test_labels()
-    
-    # Test evaluation against manual labels
-    test_label_table = save_test_label_evaluation(
-        timestep_errors_test,
-        windows_labels_test,
-        masks_labels_test
+
+    print("\nFinal masked losses:")
+    print("Validation:", validation_loss)
+    print("Test:", test_loss)
+
+    # --------------------------------------------------------
+    # Validation labels
+    # Ranges are inclusive: (start, end, label).
+    # They must correspond to validation_videos in split order.
+    # --------------------------------------------------------
+
+    validation_label_ranges = [
+        [],
+        [],
+        [
+            (47, 64, 1),
+            (246, 258, 1),
+            (388, 420, 1),
+            (423, 427, 1),
+            (476, 524, 2),
+            (687, 709, 1),
+        ],
+        [
+            (514, 515, 1),
+            (516, 532, 1),
+        ],
+    ]
+
+    validation_label_windows, validation_label_masks = (
+        create_label_windows(
+            validation_videos,
+            validation_label_ranges
+        )
     )
+
+    validation_table = evaluate_class_errors(
+        validation_timestep_errors,
+        validation_error_masks,
+        validation_label_windows,
+        validation_label_masks,
+        "mobile_validation_label_evaluation.csv"
+    )
+
+    # --------------------------------------------------------
+    # Test labels
+    # Ranges must correspond to test_videos in split order.
+    # --------------------------------------------------------
+
+    test_label_ranges = [
+        [
+            (288, 307, 1),
+            (688, 691, 1),
+            (694, 695, 1),
+        ],
+        [
+            (68, 71, 1),
+            (74, 81, 1),
+            (82, 83, 1),
+            (85, 87, 1),
+            (732, 735, 1),
+            (904, 906, 1),
+        ],
+        [
+            (428, 432, 1),
+            (439, 441, 1),
+            (444, 445, 1),
+            (447, 450, 1),
+            (453, 454, 1),
+        ],
+        [
+            (556, 563, 1),
+            (565, 566, 1),
+            (567, 568, 1),
+            (577, 585, 1),
+            (607, 611, 1),
+            (612, 616, 1),
+            (691, 699, 1),
+            (1247, 1258, 1),
+            (1270, 1276, 1),
+        ],
+    ]
+
+    test_label_windows, test_label_masks = create_label_windows(
+        test_videos,
+        test_label_ranges
+    )
+
+    test_label_table = evaluate_class_errors(
+        test_timestep_errors,
+        test_error_masks,
+        test_label_windows,
+        test_label_masks,
+        "mobile_test_label_evaluation.csv"
+    )
+
+    # Window-level test summary
+    test_summary = save_test_summary(test_window_errors)
+
+    # Save training history
+    pd.DataFrame({
+        "Epoch": range(1, len(epoch_losses) + 1),
+        "Training loss": epoch_losses
+    }).to_csv(
+        "mobile_training_history.csv",
+        index=False
+    )
+
+    print("\nPipeline completed.")
+    print("Generated CSV files:")
+    print("- mobile_validation_label_evaluation.csv")
+    print("- mobile_test_label_evaluation.csv")
+    print("- mobile_test_summary_table.csv")
+    print("- mobile_training_history.csv")
+
+    return {
+        "model": model,
+        "epoch_losses": epoch_losses,
+        "validation_table": validation_table,
+        "test_label_table": test_label_table,
+        "test_summary": test_summary,
+    }
 
 
 # ============================================================
-# 24. Run pipeline
+# 18. Run
 # ============================================================
 
 if __name__ == "__main__":
-    main()
-
+    results = main()
