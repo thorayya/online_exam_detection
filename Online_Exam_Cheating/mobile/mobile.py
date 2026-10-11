@@ -1074,6 +1074,230 @@ def create_labels():
     )
 
 
+
+# ============================================================
+# 19.1. Create test labels
+# ============================================================
+
+def create_test_labels():
+    # Test video lengths, in the same order as
+    # all_video_representations_test in split_videos().
+    labels_first_test = [0] * 736
+    labels_second_test = [0] * 928
+    labels_third_test = [0] * 942
+    labels_forth_test = [0] * 1475
+
+    label_ranges_first_test = [
+        (288, 307, 1),
+        (688, 691, 1),
+        (694, 695, 1),
+    ]
+
+    label_ranges_second_test = [
+        (68, 71, 1),
+        (74, 81, 1),
+        (82, 83, 1),
+        (85, 87, 1),
+        (732, 735, 1),
+        (904, 906, 1),
+    ]
+
+    label_ranges_third_test = [
+        (428, 432, 1),
+        (439, 441, 1),
+        (444, 445, 1),
+        (447, 450, 1),
+        (453, 454, 1),
+    ]
+
+    # These timestamps were written as MMSS.
+    # Convert all of them to seconds.
+    label_ranges_forth_test = [
+        (556, 563, 1),    # 09:16–09:23
+        (565, 566, 1),    # 09:25–09:26
+        (567, 568, 1),    # 09:27–09:28
+        (577, 585, 1),    # 09:37–09:45
+        (607, 611, 1),    # 10:07–10:11
+        (612, 616, 1),    # 10:12–10:16
+        (691, 699, 1),    # 11:31–11:39
+        (1247, 1258, 1),  # 20:47–20:58
+        (1270, 1276, 1),  # 21:10–21:16
+    ]
+
+    all_test_labels = [
+        labels_first_test,
+        labels_second_test,
+        labels_third_test,
+        labels_forth_test,
+    ]
+
+    all_test_ranges = [
+        label_ranges_first_test,
+        label_ranges_second_test,
+        label_ranges_third_test,
+        label_ranges_forth_test,
+    ]
+
+    # Apply the manually assigned labels.
+    for labels, ranges in zip(all_test_labels, all_test_ranges):
+        for start, end, label in ranges:
+            if start < 0 or end >= len(labels) or start > end:
+                raise ValueError(
+                    f"Invalid label range: {(start, end, label)} "
+                    f"for video length {len(labels)}"
+                )
+
+            for i in range(start, end + 1):
+                labels[i] = label
+
+    # Create label windows matching create_test_windows().
+    windows_labels_test = []
+    masks_labels_test = []
+
+    for labels in all_test_labels:
+        for j in range(0, len(labels), STRIDE):
+            current_window = torch.tensor(
+                labels[j:j + WINDOW_SIZE],
+                dtype=torch.long
+            )
+
+            valid_length = len(current_window)
+
+            if valid_length < WINDOW_SIZE:
+                padding_length = WINDOW_SIZE - valid_length
+
+                current_window = torch.cat([
+                    current_window,
+                    torch.zeros(padding_length, dtype=torch.long)
+                ])
+
+            mask = torch.cat([
+                torch.ones(valid_length),
+                torch.zeros(WINDOW_SIZE - valid_length)
+            ])
+
+            windows_labels_test.append(current_window)
+            masks_labels_test.append(mask)
+
+    print("Test label windows:", len(windows_labels_test))
+
+    return windows_labels_test, masks_labels_test
+
+
+# ============================================================
+# 19.2. Calculate timestep-level test reconstruction errors
+# ============================================================
+
+def calculate_test_timestep_errors(model, test_loader):
+    model.eval()
+    timestep_errors_test = []
+
+    with torch.no_grad():
+        for batch_windows_test, batch_masks_test in test_loader:
+            batch_windows_test = batch_windows_test.to(device)
+            batch_masks_test = batch_masks_test.to(device)
+
+            batch_masks_test = batch_masks_test.unsqueeze(-1)
+
+            batch_size = batch_windows_test.shape[0]
+
+            h0_test = torch.zeros(
+                NUM_LAYERS,
+                batch_size,
+                HIDDEN_SIZE,
+                device=device
+            )
+
+            reconstruction_test, _ = model(
+                batch_windows_test,
+                h0_test
+            )
+
+            error_test = (
+                batch_windows_test - reconstruction_test
+            ) ** 2
+
+            masked_error_test = error_test * batch_masks_test
+
+            # One reconstruction error per timestep.
+            timestep_error = masked_error_test.mean(dim=2)
+
+            timestep_errors_test.append(timestep_error.cpu())
+
+    timestep_errors_test = torch.cat(
+        timestep_errors_test,
+        dim=0
+    )
+
+    print("Timestep-level test errors:", timestep_errors_test.shape)
+
+    return timestep_errors_test
+
+
+# ============================================================
+# 19.3. Evaluate test errors against manual labels
+# ============================================================
+
+def save_test_label_evaluation(
+    timestep_errors_test,
+    windows_labels_test,
+    masks_labels_test
+):
+    errors = timestep_errors_test.flatten()
+
+    labels = torch.stack(windows_labels_test).flatten()
+    label_masks = torch.stack(masks_labels_test).flatten().bool()
+
+    # Ignore padded timesteps.
+    errors = errors[label_masks]
+    labels = labels[label_masks]
+
+    if len(errors) != len(labels):
+        raise ValueError(
+            f"Mismatch between test errors ({len(errors)}) "
+            f"and test labels ({len(labels)})."
+        )
+
+    rows = []
+
+    for label, name in [
+        (0, "Normal"),
+        (1, "Cheating: Book / Note / Paper"),
+        (2, "Cheating: Using a Phone"),
+    ]:
+        class_errors = errors[labels == label]
+
+        rows.append({
+            "Class": name,
+            "Label": label,
+            "Number of timesteps": len(class_errors),
+            "Mean reconstruction error": (
+                class_errors.mean().item()
+                if len(class_errors) > 0 else float("nan")
+            ),
+            "Median reconstruction error": (
+                class_errors.median().item()
+                if len(class_errors) > 0 else float("nan")
+            ),
+            "Standard deviation": (
+                class_errors.std().item()
+                if len(class_errors) > 1 else float("nan")
+            ),
+        })
+
+    test_label_table = pd.DataFrame(rows)
+
+    display(test_label_table)
+
+    test_label_table.to_csv(
+        "mobile_test_label_evaluation.csv",
+        index=False
+    )
+
+    return test_label_table
+
+
+
 # ============================================================
 # 20. Save test summary table
 # ============================================================
@@ -1384,9 +1608,27 @@ def main():
     )
 
 
+    # Test timestep-level errors
+    timestep_errors_test = calculate_test_timestep_errors(
+        model,
+        test_loader
+    )
+    
+    # Test labels
+    windows_labels_test, masks_labels_test = create_test_labels()
+    
+    # Test evaluation against manual labels
+    test_label_table = save_test_label_evaluation(
+        timestep_errors_test,
+        windows_labels_test,
+        masks_labels_test
+    )
+
+
 # ============================================================
 # 24. Run pipeline
 # ============================================================
 
 if __name__ == "__main__":
     main()
+
