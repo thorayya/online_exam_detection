@@ -969,125 +969,120 @@ print("Test tensor:", test_tensor.shape)
 #    Min/max are calculated only from valid TRAIN timesteps
 # ============================================================
 
-def normalize_features(
-    train_tensor,
-    validation_tensor,
-    test_tensor,
-    train_masks,
-    validation_masks,
-    test_masks
-):
+def normalize_features(train_tensor, train_valid_mask,
+                       validation_tensor, validation_valid_mask,
+                       test_tensor, test_valid_mask):
 
-    # True = valid timestep; False = padding
-    train_valid_mask = torch.stack(train_masks).bool()
-    validation_valid_mask = torch.stack(validation_masks).bool()
-    test_valid_mask = torch.stack(test_masks).bool()
+    # 1. Check for NaN and Inf in valid timesteps
+    datasets = [
+        ("train", train_tensor, train_valid_mask),
+        ("validation", validation_tensor, validation_valid_mask),
+        ("test", test_tensor, test_valid_mask)
+    ]
 
-    # Calculate statistics using valid TRAIN timesteps only
-    feature_min = torch.stack([
-        train_tensor[:, :, i][train_valid_mask].min()
-        for i in range(train_tensor.shape[2])
-    ])
+    for name, tensor, mask in datasets:
+        valid_values = tensor[mask.bool()]
 
-    feature_max = torch.stack([
-        train_tensor[:, :, i][train_valid_mask].max()
-        for i in range(train_tensor.shape[2])
-    ])
+        if not torch.isfinite(valid_values).all():
+            raise ValueError(
+                f"NaN or Inf detected in valid {name} features."
+            )
 
-    normalized_features = []
-    normalized_validation_features = []
-    normalized_test_features = []
+    # 2. Calculate Min-Max using valid training timesteps only
+    num_features = train_tensor.shape[2]
 
-    for i in range(train_tensor.shape[2]):
+    feature_min = torch.zeros(
+        num_features, dtype=train_tensor.dtype,
+        device=train_tensor.device
+    )
+    feature_max = torch.zeros_like(feature_min)
 
-        print(
-            f"Feature {i}: "
-            f"min = {feature_min[i].item():.4f}, "
-            f"max = {feature_max[i].item():.4f}"
-        )
+    constant_features = []
 
-        # Remove face_count (8) and object_class (28)
-        if i == 8 or i == 28:
+    for i in range(num_features):
+        # Exclude face_count (8) and object_class (28)
+        if i in (8, 28):
             continue
 
-        denominator = feature_max[i] - feature_min[i]
+        values = train_tensor[:, :, i][train_valid_mask.bool()]
 
-        # Handle constant features safely
-        if denominator == 0:
-            z = torch.zeros_like(train_tensor[:, :, i])
-            z_validation = torch.zeros_like(validation_tensor[:, :, i])
-            z_test = torch.zeros_like(test_tensor[:, :, i])
-        else:
-            z = (
-                train_tensor[:, :, i] - feature_min[i]
-            ) / denominator
+        feature_min[i] = values.min()
+        feature_max[i] = values.max()
 
-            z_validation = (
-                validation_tensor[:, :, i] - feature_min[i]
-            ) / denominator
+        if feature_max[i] == feature_min[i]:
+            constant_features.append(i)
 
-            z_test = (
-                test_tensor[:, :, i] - feature_min[i]
-            ) / denominator
+    if constant_features:
+        print(
+            "Constant training features (excluding removed features):",
+            constant_features
+        )
 
-        # Keep padding at zero after normalization
-        z = z.masked_fill(~train_valid_mask, 0)
-        z_validation = z_validation.masked_fill(~validation_valid_mask, 0)
-        z_test = z_test.masked_fill(~test_valid_mask, 0)
+    # 3. Normalize features using training statistics
+    def apply_normalization(tensor, valid_mask):
+        normalized = torch.zeros_like(tensor)
 
-        normalized_features.append(z)
-        normalized_validation_features.append(z_validation)
-        normalized_test_features.append(z_test)
+        for i in range(num_features):
+            # Exclude face_count and object_class
+            if i in (8, 28):
+                continue
 
-    normalized_features = torch.stack(
-        normalized_features
-    ).permute(1, 2, 0)
+            denominator = feature_max[i] - feature_min[i]
 
-    normalized_validation_features = torch.stack(
-        normalized_validation_features
-    ).permute(1, 2, 0)
+            if denominator == 0:
+                # Avoid division by zero for constant features
+                normalized[:, :, i] = 0
+            else:
+                normalized[:, :, i] = (
+                    tensor[:, :, i] - feature_min[i]
+                ) / denominator
 
-    normalized_test_features = torch.stack(
-        normalized_test_features
-    ).permute(1, 2, 0)
+        # Keep padding values at zero
+        normalized = normalized.masked_fill(
+            ~valid_mask.bool().unsqueeze(-1), 0
+        )
 
-    return (
-        normalized_features,
-        normalized_validation_features,
-        normalized_test_features,
-        feature_min,
-        feature_max
+        # Remove excluded features: 29 -> 27
+        keep_indices = [
+            i for i in range(num_features)
+            if i not in (8, 28)
+        ]
+
+        return normalized[:, :, keep_indices]
+
+    train_normalized = apply_normalization(
+        train_tensor, train_valid_mask
+    )
+    validation_normalized = apply_normalization(
+        validation_tensor, validation_valid_mask
+    )
+    test_normalized = apply_normalization(
+        test_tensor, test_valid_mask
     )
 
+    # 4. Final checks
+    assert train_normalized.shape[-1] == 27
+    assert validation_normalized.shape[-1] == 27
+    assert test_normalized.shape[-1] == 27
 
-(
-    normalized_features,
-    normalized_validation_features,
-    normalized_test_features,
-    feature_min,
-    feature_max
-) = normalize_features(
-    train_tensor,
-    validation_tensor,
-    test_tensor,
-    masks,
-    masks_validation,
-    masks_test
-)
+    assert torch.isfinite(train_normalized).all()
+    assert torch.isfinite(validation_normalized).all()
+    assert torch.isfinite(test_normalized).all()
 
+    print("Normalization completed successfully.")
+    print("Train shape:", train_normalized.shape)
+    print("Validation shape:", validation_normalized.shape)
+    print("Test shape:", test_normalized.shape)
 
-print("Normalized train shape:", normalized_features.shape)
-print("Normalized validation shape:", normalized_validation_features.shape)
-print("Normalized test shape:", normalized_test_features.shape)
+    return (
+        train_normalized,
+        validation_normalized,
+        test_normalized,
+        feature_min,
+        feature_max,
+        constant_features
+    )
 
-print("Train min:", normalized_features.min().item())
-print("Train max:", normalized_features.max().item())
-
-print("Validation min:", normalized_validation_features.min().item())
-print("Validation max:", normalized_validation_features.max().item())
-
-print("Test min:", normalized_test_features.min().item())
-print("Test max:", normalized_test_features.max().item())
 
 
 # ============================================================
