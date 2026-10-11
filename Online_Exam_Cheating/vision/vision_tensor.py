@@ -1863,11 +1863,6 @@ calculate_class_statistics(
     masks_labels_test
 )
 
-
-    labels = (
-        torch.stack(window_labels)
-    )
-
     # --------------------------------------------------------
     # Flatten timestep-level errors and labels
     # --------------------------------------------------------
