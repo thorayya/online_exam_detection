@@ -1459,96 +1459,62 @@ print(
     timestep_errors_validation.shape
 )
 
-
+```python
 # ============================================================
 # 16. Test reconstruction errors
 # ============================================================
 
-def calculate_test_errors(
-    model,
-    test_loader,
-    device
-):
+def calculate_test_errors(model, test_loader, device):
 
     model.eval()
 
     test_errors = []
+    timestep_errors = []
 
     with torch.no_grad():
 
-        for (
-            batch_windows,
-            batch_masks
-        ) in test_loader:
+        for batch_windows, batch_masks in test_loader:
 
-            batch_windows = batch_windows.to(
-                device
-            )
+            batch_windows = batch_windows.to(device)
+            batch_masks = batch_masks.to(device).unsqueeze(-1)
 
-            batch_masks = batch_masks.to(
-                device
-            )
+            reconstruction = model(batch_windows)
 
-            batch_masks = batch_masks.unsqueeze(
-                -1
-            )
+            error = (batch_windows - reconstruction) ** 2
+            masked_error = error * batch_masks
 
-            reconstruction = model(
-                batch_windows
-            )
+            # Timestep-level reconstruction errors
+            timestep_error = masked_error.mean(dim=2)
+            timestep_errors.append(timestep_error.cpu())
 
-            error = (
-                batch_windows
-                - reconstruction
-            ) ** 2
-
-            masked_error = (
-                error
-                * batch_masks
-            )
+            # Window-level reconstruction errors
+            denominator = (
+                batch_masks.sum(dim=(1, 2)) * 27
+            ).clamp_min(1)
 
             window_error = (
-                torch.sum(
-                    masked_error,
-                    dim=(1, 2)
-                )
-                /
-                (
-                    torch.sum(
-                        batch_masks,
-                        dim=(1, 2)
-                    )
-                    * 27
-                )
+                masked_error.sum(dim=(1, 2)) / denominator
             )
 
-            test_errors.extend(
-                window_error.cpu().tolist()
-            )
+            test_errors.extend(window_error.cpu().tolist())
 
-    return test_errors
+    timestep_errors = torch.cat(timestep_errors, dim=0)
+
+    return test_errors, timestep_errors
 
 
-test_errors = calculate_test_errors(
+test_errors, timestep_errors_test = calculate_test_errors(
     lstmae,
     test_loader,
     device
 )
 
-
-for i, error in enumerate(
-    test_errors
-):
-
-    print(
-        f"Window {i}: "
-        f"Reconstruction Error = "
-        f"{error:.6f}"
-    )
+print("Test window errors:", len(test_errors))
+print("Test timestep errors shape:", timestep_errors_test.shape)
 
 
 # ============================================================
-# 17. Labels
+# 17. Label definitions
 # ============================================================
 
 Normal = 0
@@ -1561,7 +1527,7 @@ cheating_types = {
 
 
 # ============================================================
-# Label ranges
+# 18. Validation label ranges
 # ============================================================
 
 label_ranges_first = [
@@ -1619,7 +1585,7 @@ label_ranges_forth = [
 
 
 # ============================================================
-# 18. Create frame-level + window-level labels
+# 19. Create frame-level and window-level labels
 # ============================================================
 
 def create_window_labels(
@@ -1633,67 +1599,35 @@ def create_window_labels(
 
     for start, end, label in label_ranges:
 
-        for i in range(
-            start,
-            end + 1
-        ):
-
+        for i in range(start, min(end + 1, num_frames)):
             labels[i] = label
 
     window_labels = []
 
-    for i in range(
-        0,
-        num_frames,
-        stride
-    ):
+    for i in range(0, num_frames, stride):
+        window_labels.append(labels[i:i + window_size])
 
-        window_labels.append(
-            labels[
-                i:i + window_size
-            ]
-        )
-
-    return (
-        labels,
-        window_labels
-    )
+    return labels, window_labels
 
 
-labels_first, window_labels_first = (
-    create_window_labels(
-        1055,
-        label_ranges_first
-    )
+# Validation labels
+labels_first, window_labels_first = create_window_labels(
+    1055, label_ranges_first
 )
 
-labels_second, window_labels_second = (
-    create_window_labels(
-        1366,
-        label_ranges_second
-    )
+labels_second, window_labels_second = create_window_labels(
+    1366, label_ranges_second
 )
 
-labels_third, window_labels_third = (
-    create_window_labels(
-        1061,
-        label_ranges_third
-    )
+labels_third, window_labels_third = create_window_labels(
+    1061, label_ranges_third
 )
 
-labels_forth, window_labels_forth = (
-    create_window_labels(
-        1162,
-        label_ranges_forth
-    )
+labels_forth, window_labels_forth = create_window_labels(
+    1162, label_ranges_forth
 )
 
-
-# ============================================================
-# 19. Combine validation labels
-# ============================================================
-
-window_labels = (
+window_labels_validation = (
     window_labels_first
     + window_labels_second
     + window_labels_third
@@ -1702,13 +1636,10 @@ window_labels = (
 
 
 # ============================================================
-# 20. Prepare padded labels + masks
+# 20. Prepare padded labels and masks
 # ============================================================
 
-def prepare_window_labels(
-    window_labels,
-    window_size=10
-):
+def prepare_window_labels(window_labels, window_size=10):
 
     windows_labels = []
     masks_labels = []
@@ -1720,83 +1651,152 @@ def prepare_window_labels(
             dtype=torch.long
         )
 
-        # ----------------------------------------------------
-        # Full window
-        # ----------------------------------------------------
+        valid_length = current_window.shape[0]
+        padding_length = window_size - valid_length
 
-        if current_window.shape[0] == window_size:
+        if padding_length > 0:
 
-            windows_labels.append(
-                current_window
-            )
+            current_window = torch.cat([
+                current_window,
+                torch.zeros(padding_length, dtype=torch.long)
+            ])
 
-            masks_labels.append(
-                torch.ones(window_size)
-            )
+        mask = torch.cat([
+            torch.ones(valid_length),
+            torch.zeros(padding_length)
+        ])
 
-        # ----------------------------------------------------
-        # Incomplete window
-        # ----------------------------------------------------
+        windows_labels.append(current_window)
+        masks_labels.append(mask)
 
-        else:
-
-            padding_length = (
-                window_size
-                - current_window.shape[0]
-            )
-
-            padding = torch.zeros(
-                padding_length,
-                dtype=torch.long
-            )
-
-            mask = torch.ones(
-                current_window.shape[0]
-            )
-
-            mask_padding = torch.zeros(
-                padding_length
-            )
-
-            ending_window_labels = torch.cat(
-                [
-                    current_window,
-                    padding
-                ]
-            )
-
-            ending_mask_labels = torch.cat(
-                [
-                    mask,
-                    mask_padding
-                ]
-            )
-
-            windows_labels.append(
-                ending_window_labels
-            )
-
-            masks_labels.append(
-                ending_mask_labels
-            )
-
-    return (
-        windows_labels,
-        masks_labels
-    )
+    return windows_labels, masks_labels
 
 
 (
     windows_labels_validation,
     masks_labels_validation
 ) = prepare_window_labels(
-    window_labels,
+    window_labels_validation,
     window_size=10
 )
 
 
 # ============================================================
-# 21. Calculate class statistics
+# 21. Test label ranges
+# ============================================================
+
+label_ranges_first_test = [
+    (1, 7, 1),
+    (151, 156, 1),
+    (274, 288, 1),
+    (304, 369, 1),
+    (513, 568, 1),
+    (606, 613, 1),
+    (674, 676, 1),
+    (679, 682, 1),
+    (685, 699, 1),
+    (707, 714, 1),
+    (732, 735, 1),
+]
+
+label_ranges_second_test = [
+    (3, 4, 1),
+    (346, 349, 1),
+    (358, 364, 1),
+    (854, 858, 1),
+    (860, 862, 1),
+    (865, 867, 1),
+    (870, 871, 1),
+    (922, 924, 1),
+]
+
+label_ranges_third_test = [
+    (1, 2, 1),
+    (3, 9, 1),
+    (15, 25, 1),
+    (278, 286, 1),
+    (289, 293, 1),
+    (425, 433, 1),
+    (438, 445, 2),
+    (449, 452, 1),
+    (458, 463, 1),
+    (466, 467, 1),
+    (518, 523, 1),
+    (554, 556, 1),
+    (843, 873, 1),
+    (874, 888, 1),
+    (901, 906, 1),
+    (937, 941, 1),
+]
+
+label_ranges_forth_test = [
+    (1, 5, 1),
+    (14, 16, 1),
+    (189, 212, 1),
+    (328, 363, 1),
+    (547, 555, 1),
+    (561, 564, 1),
+    (569, 583, 1),
+    (682, 688, 1),
+    (697, 700, 1),
+    (707, 711, 1),
+    (748, 831, 1),
+    (833, 846, 1),
+    (941, 1050, 1),
+    (1084, 1105, 1),
+    (1109, 1130, 1),
+    (1133, 1148, 1),
+    (1151, 1153, 1),
+    (1157, 1160, 1),
+    (1164, 1178, 1),
+    (1228, 1235, 1),
+    (1248, 1282, 1),
+    (1317, 1326, 1),
+    (1345, 1357, 1),
+    (1386, 1420, 1),
+    (1407, 1414, 1),
+    (1417, 1443, 1),
+]
+
+
+# ============================================================
+# 22. Create Test frame-level and window-level labels
+# ============================================================
+
+labels_first_test, window_labels_first_test = create_window_labels(
+    736, label_ranges_first_test
+)
+
+labels_second_test, window_labels_second_test = create_window_labels(
+    928, label_ranges_second_test
+)
+
+labels_third_test, window_labels_third_test = create_window_labels(
+    942, label_ranges_third_test
+)
+
+labels_forth_test, window_labels_forth_test = create_window_labels(
+    1475, label_ranges_forth_test
+)
+
+window_labels_test = (
+    window_labels_first_test
+    + window_labels_second_test
+    + window_labels_third_test
+    + window_labels_forth_test
+)
+
+(
+    windows_labels_test,
+    masks_labels_test
+) = prepare_window_labels(
+    window_labels_test,
+    window_size=10
+)
+
+
+# ============================================================
+# 23. Calculate class statistics
 # ============================================================
 
 def calculate_class_statistics(
@@ -1805,10 +1805,64 @@ def calculate_class_statistics(
     label_mask=None
 ):
 
-    errors = (
-        timestep_errors
-        .cpu()
-    )
+    errors = timestep_errors.detach().cpu().flatten()
+    labels = torch.stack(window_labels).flatten()
+
+    if label_mask is not None:
+        valid_mask = torch.stack(label_mask).flatten().bool()
+        errors = errors[valid_mask]
+        labels = labels[valid_mask]
+
+    print("\nClass reconstruction error statistics:")
+
+    for label, name in [
+        (0, "Normal"),
+        (1, cheating_types[1]),
+        (2, cheating_types[2]),
+        (3, cheating_types[3])
+    ]:
+
+        class_errors = errors[labels == label]
+
+        if class_errors.numel() == 0:
+            print(f"{name}: No samples")
+            continue
+
+        print(
+            f"{name}: "
+            f"Count={class_errors.numel()}, "
+            f"Mean={class_errors.mean().item():.6f}, "
+            f"Std={class_errors.std(unbiased=False).item():.6f}, "
+            f"Min={class_errors.min().item():.6f}, "
+            f"Max={class_errors.max().item():.6f}"
+        )
+
+
+# ============================================================
+# 24. Evaluate Validation
+# ============================================================
+
+assert len(windows_labels_validation) == timestep_errors_validation.shape[0]
+
+calculate_class_statistics(
+    timestep_errors_validation,
+    windows_labels_validation,
+    masks_labels_validation
+)
+
+
+# ============================================================
+# 25. Evaluate Test
+# ============================================================
+
+assert len(windows_labels_test) == timestep_errors_test.shape[0]
+
+calculate_class_statistics(
+    timestep_errors_test,
+    windows_labels_test,
+    masks_labels_test
+)
+
 
     labels = (
         torch.stack(window_labels)
