@@ -523,8 +523,8 @@ def create_video_representations(
             # =================================================
 
             gaze_face_confidence_observation = gaze[0, 2]
-            gaze_pitch_observation = gaze[0, 1]
-            gaze_yaw_observation = gaze[0, 0]
+            gaze_pitch_observation = gaze[0, 0]
+            gaze_yaw_observation = gaze[0, 1]
 
             left_iris_x_observation = gaze[0, 3]
             left_iris_y_observation = gaze[0, 4]
@@ -1861,48 +1861,4 @@ calculate_class_statistics(
     timestep_errors_test,
     windows_labels_test,
     masks_labels_test
-)
-
-    # --------------------------------------------------------
-    # Flatten timestep-level errors and labels
-    # --------------------------------------------------------
-
-    errors = errors.flatten()
-    labels = labels.flatten()
-
-    # --------------------------------------------------------
-    # Remove padded timesteps
-    # --------------------------------------------------------
-
-    if label_mask is not None:
-
-        label_mask = (
-            torch.stack(label_mask)
-            .flatten()
-            .bool()
-        )
-
-        errors = errors[label_mask]
-        labels = labels[label_mask]
-
-    # --------------------------------------------------------
-    # Normal vs Cheating
-    # --------------------------------------------------------
-
-    for label, name in [
-        (0, "Normal"),
-        (2, "Cheating")
-    ]:
-
-        class_errors = (
-            errors[
-                labels == label
-            ]
-        )
-
-
-calculate_class_statistics(
-    timestep_errors_validation,
-    windows_labels_validation,
-    masks_labels_validation
 )
