@@ -1,4 +1,3 @@
-from os.path import sameopenfile
 import numpy as np
 import soundfile as sf
 
