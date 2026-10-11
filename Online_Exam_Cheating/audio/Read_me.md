@@ -168,3 +168,34 @@ For reproducible results, use compatible dependency versions and document any en
 
 A license can be added to specify the terms under which this code may be used, modified, and distributed. Ensure that any dataset or audio recordings are shared only when their licenses permit redistribution.
 
+
+
+### Splitting Large Audio Files
+
+If an audio file is too large to process at once, this script splits it into two approximately equal parts and saves them as separate WAV files.
+
+The script preserves the original sample rate and divides the audio at its midpoint.
+
+**Requirements:**
+- Python
+- `soundfile`
+
+Install the required package:
+
+```bash
+pip install soundfile
+```
+
+**Usage:**
+
+1. Set `input_path` to the location of your audio file.
+2. Set `part1_path` and `part2_path` to the desired output locations.
+3. Run the script:
+
+```bash
+python split_audio.py
+```
+
+**Note:** The script loads the entire audio file into memory. For very large files or systems with limited RAM, a memory-efficient approach may be necessary.
+
+
