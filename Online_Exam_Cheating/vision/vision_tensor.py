@@ -1084,6 +1084,28 @@ def normalize_features(train_tensor, train_valid_mask,
     )
 
 
+# Convert masks from lists to tensors
+train_valid_mask = torch.stack(masks)
+validation_valid_mask = torch.stack(masks_validation)
+test_valid_mask = torch.stack(masks_test)
+
+# Normalize features
+(
+    normalized_features,
+    normalized_validation_features,
+    normalized_test_features,
+    feature_min,
+    feature_max,
+    constant_features
+) = normalize_features(
+    train_tensor,
+    train_valid_mask,
+    validation_tensor,
+    validation_valid_mask,
+    test_tensor,
+    test_valid_mask
+)
+
 
 # ============================================================
 # 10. Dataset
