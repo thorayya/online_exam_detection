@@ -38,4 +38,4 @@ for input_path in input_paths:
 merged_audio = np.concatenate(audio_data, axis = 0)
 
 sf.write(output_paths, merged_audio, sample_rate)
-print(f"saved")
+print("saved")
