@@ -1,247 +1,208 @@
-### **Audio Denoising with DeepFilterNet3**
+# Audio Processing Pipeline
 
+This repository contains audio preprocessing and speaker diarization tools developed as part of a multimodal online examination integrity research project.
 
+The pipeline includes audio denoising, audio splitting and merging, and speaker diarization. These components prepare audio recordings for subsequent analysis and multimodal fusion.
 
-A Python-based audio preprocessing tool for batch noise reduction using DeepFilterNet3, developed as part of a multimodal online exam cheating detection research project.
+## 1. Audio Denoising with DeepFilterNet3
 
+A Python-based tool for batch noise reduction using DeepFilterNet3.
 
+### Features
 
-###### Overview
+- **Batch Processing:** Processes WAV files organized into subject-specific directories.
+- **Deep Learning-Based Enhancement:** Uses DeepFilterNet3 to reduce background noise.
+- **Efficient Initialization:** Loads the enhancement model once per processing session.
+- **Organized Output:** Prefixes output filenames with their subject folder names.
+- **Skip Existing Files:** Avoids reprocessing previously saved recordings.
+- **Error Handling:** Continues processing when an individual recording fails.
 
+### Requirements
 
+- Python 3.11
+- DeepFilterNet 0.5.6
+- Compatible PyTorch and TorchAudio versions
 
-This project applies DeepFilterNet3 to WAV audio recordings organized into subject-specific folders. The enhanced recordings are saved to a separate output directory for subsequent audio analysis.
+### Installation
 
-
-
-###### **Features**
-
-
-
-Batch Processing: Processes WAV files from multiple subject directories.
-
-
-
-DeepFilterNet3: Uses a deep learning-based audio enhancement model.
-
-
-
-Efficient Initialization: Loads the model once per processing session.
-
-
-
-Organized Output: Prefixes output filenames with their corresponding subject folder names.
-
-
-
-Skip Existing Files: Avoids reprocessing files that have already been saved.
-
-
-
-Error Handling: Continues processing other recordings when an individual file encounters an error.
-
-
-
-###### **Requirements**
-
-
-
-Python 3.11
-
-
-
-DeepFilterNet 0.5.6
-
-
-
-Compatible PyTorch and TorchAudio versions
-
-
-
-###### **Installation**
-
-
-
-Install DeepFilterNet in a compatible Python environment:
-
-
-
+```bash
 pip install deepfilternet==0.5.6
+```
 
+### Dataset Structure
 
+The input directory should contain subject-specific folders:
 
-###### **Dataset Structure**
-
-
-
-The input dataset should follow this structure:
-
-
-
+```text
 dataset/
-
 ├── subject1/
-
 │   ├── recording1.wav
-
 │   └── recording2.wav
-
 ├── subject2/
-
 │   ├── recording1.wav
-
 │   └── recording2.wav
-
 └── subject3/
+    └── recording1.wav
+```
 
-&#x20;   └── recording1.wav
+### Configuration and Usage
 
+Update `dataset_path` and `output_dir` in `audio_denoising.py` to match your environment.
 
+Run the script:
 
-###### **Configuration**
+```bash
+python audio_denoising.py
+```
 
+Enhanced recordings are saved to the configured output directory using the following naming convention:
 
+```text
+<subject_name>_<original_filename>.wav
+```
 
-Before running the script, update the following paths in audio\_denoising.py to match your environment:
+Existing output files are skipped.
 
+---
 
+## 2. Splitting Large Audio Files
 
-dataset\_path: Directory containing the subject folders and WAV recordings.
+The `split_audio.py` script divides an audio file into two approximately equal parts and saves them as separate WAV files.
 
+### Usage
 
+Configure the input audio path and the output paths for both segments in the script, then run:
 
-output\_dir: Directory where the enhanced recordings will be saved.
+```bash
+python split_audio.py
+```
 
+The script preserves the original sample rate. It loads the audio into memory, so very large recordings may require substantial RAM.
 
+---
 
-###### **Usage**
+## 3. Merging Audio Segments
 
+The `merge_audio.py` script concatenates multiple WAV segments into a single audio file. It can be used to reconstruct recordings that were previously split into smaller parts, including denoised recordings.
 
+### Features
 
-Run the script from an environment where the required dependencies are installed:
+- Concatenates segments in the specified order.
+- Validates sample rates and channel counts.
+- Saves the merged recording as a WAV file.
+- Skips incompatible segments rather than automatically resampling them or converting their channel layouts.
 
+### Requirements
 
-
-&#x09;python audio\_denoising.py
-
-
-
-The enhanced recordings will be saved to the specified output directory.
-
-
-
-###### **Output**
-
-
-
-Output filenames follow this format:
-
-
-
-<subject\_name>\_<original\_filename>.wav
-
-
-
-Existing output files are skipped to avoid unnecessary processing.
-
-
-
-###### **Research Context**
-
-
-
-This tool serves as an audio preprocessing component in a multimodal online exam cheating detection research project. The denoised recordings can be used in subsequent audio analysis and multimodal learning experiments.
-
-
-
-Reproducibility
-
-
-
-For reproducible results, use compatible dependency versions and document any environment-specific configuration changes.
-
-
-
-###### **License**
-
-
-
-A license can be added to specify the terms under which this code may be used, modified, and distributed. Ensure that any dataset or audio recordings are shared only when their licenses permit redistribution.
-
-
-
-### Splitting Large Audio Files
-
-If an audio file is too large to process at once, this script splits it into two approximately equal parts and saves them as separate WAV files.
-
-The script preserves the original sample rate and divides the audio at its midpoint.
-
-
-### Merging Audio Segments
-
-This script merges multiple WAV audio segments into a single audio file. It is designed to reconstruct audio recordings that were previously split into smaller parts, including enhanced recordings generated during audio preprocessing.
-
-**Features:**
-- **Segment Concatenation:** Combines audio segments in the specified order.
-- **Sample Rate Validation:** Checks whether the segments have matching sample rates.
-- **Channel Validation:** Checks whether the segments have matching numbers of audio channels.
-- **WAV Output:** Saves the merged recording as a WAV file.
-
-**Requirements:**
 - Python
 - NumPy
-- `soundfile`
+- SoundFile
 
-Install the required packages:
+Install the dependencies:
 
 ```bash
 pip install numpy soundfile
 ```
 
-**Usage:**
+### Usage
 
-1. Set `input_paths` to the paths of the audio segments in the desired order.
-2. Set `output_paths` to the destination path for the merged WAV file.
+1. Set `input_paths` to the audio segments in the desired order.
+2. Set `output_path` to the destination WAV file.
 3. Run the script:
 
 ```bash
 python merge_audio.py
 ```
 
-**Output:**
+All segments must have matching sample rates and compatible channel configurations. Ensure that the input paths are ordered correctly to preserve the intended recording sequence.
 
-The script concatenates the compatible audio segments and saves the resulting recording to the specified output path.
+---
 
-**Important Notes:**
-- All segments included in the merged output must have matching sample rates and compatible channel configurations.
-- If a segment has a different sample rate or number of channels, the script prints a warning and excludes that segment from the merged output.
-- The script does not automatically resample audio or convert between mono and stereo.
-- The segments are concatenated in the order specified in `input_paths`; ensure they are listed correctly to preserve the original recording sequence.
+## 4. Speaker Diarization with NVIDIA Sortformer
 
-**Research Context:**
+The `audio_diarization.py` script identifies speaker segments in audio recordings using NVIDIA's pretrained Sortformer model.
 
-This script is part of the audio preprocessing pipeline for a multimodal online exam cheating detection research project. It supports the reconstruction of complete audio recordings from smaller segments before subsequent audio analysis and multimodal learning experiments.
+### Features
 
-**Requirements:**
-- Python
-- `soundfile`
+- Supports WAV, FLAC, MP3, OGG, and M4A input files.
+- Converts recordings to mono audio at 16 kHz.
+- Predicts speaker labels and their corresponding time intervals.
+- Preserves timestamps relative to the original audio recording.
+- Exports results to JSON for downstream multimodal fusion.
 
-Install the required package:
+### Requirements
 
-```bash
-pip install soundfile
-```
+- A Python environment compatible with the installed NeMo release
+- librosa
+- NumPy
+- `nemo_toolkit[asr]`
 
-**Usage:**
-
-1. Set `input_path` to the location of your audio file.
-2. Set `part1_path` and `part2_path` to the desired output locations.
-3. Run the script:
+### Installation
 
 ```bash
-python split_audio.py
+pip install librosa numpy "nemo_toolkit[asr]"
 ```
 
-**Note:** The script loads the entire audio file into memory. For very large files or systems with limited RAM, a memory-efficient approach may be necessary.
+### Usage
+
+Run the script with the directory containing the audio recordings and the desired output path:
+
+```bash
+python audio_diarization.py \
+  --audio-dir "path/to/audios" \
+  --output "sortformer_results.json"
+```
+
+The script loads the pretrained model:
+
+```text
+nvidia/diar_sortformer_4spk-v1
+```
+
+Internet access may be required on the first run to download the model weights.
+
+### Output Format
+
+The JSON file contains the predicted speaker segments for each recording:
+
+```json
+{
+  "recording.wav": [
+    {
+      "start": 0.32,
+      "end": 2.15,
+      "speaker": "speaker_0"
+    },
+    {
+      "start": 2.40,
+      "end": 3.10,
+      "speaker": "speaker_1"
+    }
+  ]
+}
+```
+
+Timestamps are measured in seconds relative to the original audio file. Speaker labels represent model predictions and should not be assumed to identify the true number of people without validation.
+
+---
+
+## Research Context
+
+These tools form part of the audio processing pipeline for a multimodal online examination integrity research project.
+
+Audio denoising improves recording quality, splitting and merging support audio file management, and speaker diarization provides speaker-related temporal information. The resulting data can be used in subsequent audio analysis and multimodal fusion with vision and mobile-derived features.
+
+Speaker count or the presence of multiple speakers alone does not establish suspicious behavior or cheating. Audio-derived evidence should be interpreted alongside other modalities and evaluated using appropriate validation procedures.
+
+## Reproducibility and Data Usage
+
+- Document environment-specific settings and compatible dependency versions.
+- Verify model and library compatibility before running the scripts.
+- Keep large recordings and generated intermediate files outside the repository unless they are explicitly needed and permitted for publication.
+- Share datasets only when their licenses and applicable privacy requirements permit redistribution.
+
+## License
+
+Add a repository license specifying the terms under which the code may be used, modified, and distributed. Check the licenses of third-party models, libraries, and datasets separately.
 
 
