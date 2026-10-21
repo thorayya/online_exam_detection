@@ -1,0 +1,55 @@
+# Online Examination Integrity — XGBoost Baseline
+
+## Overview
+This project explores multimodal anomaly detection for online examination integrity using vision and audio features.
+
+The baseline combines **27 vision features + 2 audio features** into a 29-dimensional representation and uses XGBoost to classify normal and potentially cheating behavior.
+
+## Configuration
+
+| Setting | Value |
+|---|---|
+| Window size / stride | 10 / 8 |
+| Fused features | 29 |
+| Training windows | 2,064 |
+| Validation windows | 582 |
+| Test windows | 511 |
+| Cross-validation | StratifiedGroupKFold (3 folds) |
+| Hyperparameter search | 50 iterations |
+| Random seed | 42 |
+
+Frame-level labels use one-based inclusive indices. Labels 1 and 2 are mapped to the positive class, *Cheating*.
+
+## Method
+- Align audio and vision windows using video filenames and timestamps.
+- Fuse the 27 vision and 2 audio features.
+- Exclude timesteps without annotation coverage.
+- Tune XGBoost using video-grouped cross-validation.
+- Select the decision threshold using training out-of-fold predictions.
+- Evaluate on validation and test sets.
+
+## Recorded Results
+
+Audio alignment:
+
+| Split | Matched | Missing |
+|---|---:|---:|
+| Train | 2,056 | 8 |
+| Validation | 581 | 1 |
+| Test | 508 | 3 |
+
+Test F1 varied substantially across videos, from **0.164 to 0.794**, highlighting differences in model performance between videos.
+
+The best recorded hyperparameters include `max_depth=8`, `n_estimators=400`, `learning_rate=0.02`, and `scale_pos_weight=5`.
+
+## Output Files
+- `model_summary.json` — model configuration and summary metrics
+- `training_oof_thresholds.csv` — threshold analysis
+- `validation_per_video.csv` — validation metrics
+- `test_per_video.csv` — test metrics
+- `feature_importance.csv` — feature importance
+
+## Limitations
+Performance depends on annotation quality, video alignment, missing audio, and the selected threshold. Video-level results should be examined alongside aggregate metrics.
+
+**This is an experimental research baseline, not a validated proctoring system. Predictions are not proof of misconduct.**
