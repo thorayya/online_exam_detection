@@ -2,7 +2,6 @@
 # EARLY FUSION: VISION (27) + AUDIO (2) = 29 FEATURES
 # ============================================================
 
-import os
 import json
 from pathlib import Path
 from collections import Counter
@@ -40,7 +39,6 @@ VISION_DIM = 27
 AUDIO_DIM = 2
 FUSION_DIM = VISION_DIM + AUDIO_DIM
 
-NORMAL = 0
 MIN_POSITIVE_FRAMES = 2
 EPOCHS = 100
 BATCH_SIZE = 32
@@ -216,31 +214,6 @@ def build_frame_labels(lengths, ranges_list):
     return result
 
 
-def frame_labels_to_windows(frame_labels, window_size=WINDOW_SIZE,
-                            stride=STRIDE):
-    """
-    Generate window label matrix and validity mask.
-    Final incomplete windows are padded with 0 but masked invalid.
-    """
-    windows = []
-    valid_masks = []
-
-    for start in range(0, len(frame_labels), stride):
-        chunk = frame_labels[start:start + window_size]
-        valid_count = len(chunk)
-
-        padded = np.zeros(window_size, dtype=np.int64)
-        valid = np.zeros(window_size, dtype=bool)
-
-        padded[:valid_count] = chunk
-        valid[:valid_count] = True
-
-        windows.append(padded)
-        valid_masks.append(valid)
-
-    return np.asarray(windows), np.asarray(valid_masks)
-
-
 def binary_window_labels(window_labels, valid_masks,
                          min_positive_frames=MIN_POSITIVE_FRAMES):
     """Positive if at least N valid frames have label 1 or 2."""
@@ -394,6 +367,12 @@ for record in audio_records:
 
 print("Audio records loaded:", len(audio_records))
 print("Unique audio video names:", len(audio_by_name))
+
+# Load the Vision arrays used by the fusion step.
+data = {split: load_vision_split(split) for split in SPLITS}
+for split in SPLITS:
+    print(f"Loaded Vision {split}: {data[split]['features'].shape}")
+
 # ============================================================
 # 6. ALIGN AUDIO AND BUILD EARLY FUSION
 # ============================================================
@@ -403,7 +382,6 @@ fused_video_names = {}
 fused_start_seconds = {}
 fused_audio_masks = {}
 fused_vision_masks = {}
-audio_alignment_report = {}
 
 for split in SPLITS:
     vision = data[split]["features"]
@@ -481,11 +459,6 @@ for split in SPLITS:
     fused_start_seconds[split] = times.copy()
     fused_audio_masks[split] = aligned_audio_masks
     fused_vision_masks[split] = data[split]["masks"].copy()
-
-    audio_alignment_report[split] = {
-        "matched": matched,
-        "missing": missing,
-    }
 
     print(
         f"{split}: Vision={vision.shape}, Audio={aligned_audio.shape}, "
@@ -725,7 +698,7 @@ model.compile(
 model.summary()
 
 # Preserve the original training setup: reconstruct all training windows.
-history = model.fit(
+model.fit(
     X_train,
     X_train,
     epochs=EPOCHS,
