@@ -1,516 +1,356 @@
 
-import os
+from ultralytics import YOLO
 import cv2
-import pickle
 import numpy as np
+import mediapipe as mp
 
-from collections import Counter
-
-from mobile.object_hand_features import (
-    ObjectHandFeatureExtractor
-)
+from mediapipe.tasks.python import vision
 
 
-# ============================================================
-# 1. CONFIGURATION
-# ============================================================
+class ObjectHandFeatureExtractor:
 
-dataset_path = "PATH_TO_OEP_DATABASE"
-
-model_path = "hand_landmarker.task"
-
-yolo_model = "yolo11n.pt"
-
-output_path = (
-    "/content/drive/MyDrive/"
-    "Online_Exam_Cheating/mobile/"
-    "mobile_features_full.pkl"
-)
-
-FRAME_INTERVAL = 25
-
-DEVICE = None
-# None = automatic device selection by Ultralytics
-
-
-# ============================================================
-# 2. VERIFY PATHS
-# ============================================================
-
-if not os.path.isdir(dataset_path):
-
-    raise FileNotFoundError(
-        f"Dataset directory not found: {dataset_path}"
-    )
-
-if not os.path.isfile(model_path):
-
-    raise FileNotFoundError(
-        f"Hand landmark model not found: {model_path}"
-    )
-
-os.makedirs(
-    os.path.dirname(output_path),
-    exist_ok=True
-)
-
-
-# ============================================================
-# 3. FIND VIDEOS
-# ============================================================
-
-video_paths = []
-
-for subject in sorted(os.listdir(dataset_path)):
-
-    subject_path = os.path.join(
-        dataset_path,
-        subject
-    )
-
-    if not os.path.isdir(subject_path):
-        continue
-
-    videos = sorted([
-
-        f for f in os.listdir(subject_path)
-
-        if f.lower().endswith(".avi")
-
-    ])
-
-    if not videos:
-        continue
-
-    # Preserve the original selection logic:
-    # first AVI video in each subject folder.
-
-    selected_video = videos[0]
-
-    video_paths.append({
-
-        "subject": subject,
-
-        "video": selected_video,
-
-        "path": os.path.join(
-            subject_path,
-            selected_video
-        )
-
-    })
-
-
-print("=" * 70)
-print("VIDEO DISCOVERY")
-print("=" * 70)
-
-print("Videos found:", len(video_paths))
-
-for item in video_paths:
-
-    print(
-        item["subject"],
-        "|",
-        item["video"]
-    )
-
-
-# ============================================================
-# 4. INITIALIZE EXTRACTOR
-# ============================================================
-
-extractor = ObjectHandFeatureExtractor(
-
-    model_path=model_path,
-
-    yolo_model=yolo_model,
-
-    device=DEVICE
-
-)
-
-
-# ============================================================
-# 5. PROCESS VIDEOS
-# ============================================================
-
-all_sequences = []
-
-total_frames = 0
-
-total_objects = 0
-
-total_hands = 0
-
-total_relations = 0
-
-error_count = 0
-
-video_summaries = []
-
-
-try:
-
-    for video_number, item in enumerate(
-        video_paths,
-        start=1
+    def __init__(
+        self,
+        model_path,
+        yolo_model="yolo11n.pt",
+        device=None
     ):
 
-        print("\n" + "=" * 70)
+        self.model_path = model_path
+        self.device = device
 
-        print(
-            f"VIDEO {video_number}/{len(video_paths)}:",
-            item["subject"],
-            item["video"]
+        self.model = YOLO(yolo_model)
+
+        self.classes = {
+            0: "person",
+            63: "laptop",
+            67: "cell phone",
+            73: "book"
+        }
+
+        # ========================================================
+        # MEDIAPIPE INITIALIZATION
+        # ========================================================
+
+        BaseOptions = mp.tasks.BaseOptions
+
+        HandLandmarkerOptions = (
+            mp.tasks.vision.HandLandmarkerOptions
         )
 
-        print("=" * 70)
+        VisionRunningMode = (
+            mp.tasks.vision.RunningMode
+        )
 
-        cap = cv2.VideoCapture(item["path"])
+        options = HandLandmarkerOptions(
 
-        if not cap.isOpened():
+            base_options=BaseOptions(
+                model_asset_path=self.model_path
+            ),
 
-            print(
-                "WARNING: Cannot open video:",
-                item["path"]
+            running_mode=VisionRunningMode.VIDEO,
+
+            num_hands=2,
+
+            min_hand_detection_confidence=0.5,
+
+            min_hand_presence_confidence=0.5,
+
+            min_tracking_confidence=0.5
+
+        )
+
+        self.detector = (
+            vision.HandLandmarker.create_from_options(
+                options
+            )
+        )
+
+        # ========================================================
+        # LANDMARK NAMES
+        # ========================================================
+
+        self.landmark_names = [
+
+            "wrist",
+
+            "thumb_cmc",
+            "thumb_mcp",
+            "thumb_ip",
+            "thumb_tip",
+
+            "index_mcp",
+            "index_pip",
+            "index_dip",
+            "index_tip",
+
+            "middle_mcp",
+            "middle_pip",
+            "middle_dip",
+            "middle_tip",
+
+            "ring_mcp",
+            "ring_pip",
+            "ring_dip",
+            "ring_tip",
+
+            "pinky_mcp",
+            "pinky_pip",
+            "pinky_dip",
+            "pinky_tip"
+
+        ]
+
+
+    # ============================================================
+    # 1. EXTRACT ALL YOLO OBJECTS
+    # ============================================================
+
+    def extract_objects(self, frame):
+
+        objects = []
+
+        height, width = frame.shape[:2]
+
+        results = self.model(
+            frame,
+            classes=list(self.classes.keys()),
+            verbose=False,
+            device=self.device
+        )
+
+        for result in results:
+
+            for i, box in enumerate(result.boxes):
+
+                class_id = int(box.cls[0].item())
+
+                confidence = float(
+                    box.conf[0].item()
+                )
+
+                # Pixel coordinates
+                bbox_xyxy = (
+                    box.xyxy[0]
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+
+                # Normalized coordinates
+                bbox_normalized = (
+                    box.xyxyn[0]
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32)
+                )
+
+                x1, y1, x2, y2 = bbox_xyxy
+
+                xn1, yn1, xn2, yn2 = bbox_normalized
+
+                objects.append({
+
+                    "detection_id": len(objects),
+
+                    "class_id": class_id,
+
+                    "name": self.classes[class_id],
+
+                    "conf": confidence,
+
+                    "bbox_xyxy": [
+                        float(x1),
+                        float(y1),
+                        float(x2),
+                        float(y2)
+                    ],
+
+                    "bbox_normalized": [
+                        float(xn1),
+                        float(yn1),
+                        float(xn2),
+                        float(yn2)
+                    ],
+
+                    "center_normalized": [
+
+                        float((xn1 + xn2) / 2),
+
+                        float((yn1 + yn2) / 2)
+
+                    ],
+
+                    "width_normalized": float(xn2 - xn1),
+
+                    "height_normalized": float(yn2 - yn1)
+
+                })
+
+        return objects
+
+
+    # ============================================================
+    # 2. EXTRACT ALL HANDS AND 21 LANDMARKS
+    # ============================================================
+
+    def extract_hands(self, frame, time_stamp):
+
+        hands = []
+
+        height, width = frame.shape[:2]
+
+        rgb_frame = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2RGB
+        )
+
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_frame
+        )
+
+        result = self.detector.detect_for_video(
+            mp_image,
+            time_stamp
+        )
+
+        for hand_index, hand_landmarks in enumerate(
+            result.hand_landmarks
+        ):
+
+            handedness = (
+                result.handedness[hand_index][0]
+                .category_name
             )
 
-            continue
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-
-        if not np.isfinite(fps) or fps <= 0:
-
-            print(
-                "WARNING: Invalid FPS. Using 25."
+            handedness_score = float(
+                result.handedness[hand_index][0]
+                .score
             )
 
-            fps = 25.0
+            landmarks = []
 
-        frame_id = 0
+            for landmark_index, landmark in enumerate(
+                hand_landmarks
+            ):
 
-        video_frames = 0
+                landmarks.append({
 
-        video_objects = 0
+                    "index": landmark_index,
 
-        video_hands = 0
+                    "name": self.landmark_names[
+                        landmark_index
+                    ],
 
-        video_relations = 0
+                    "x": float(landmark.x),
 
-        while cap.isOpened():
+                    "y": float(landmark.y),
 
-            ret, frame = cap.read()
+                    "z": float(landmark.z),
 
-            if not ret:
-                break
+                    "x_pixel": float(
+                        landmark.x * width
+                    ),
 
-            frame_id += 1
-
-            # Process one frame every 25 frames
-            if frame_id % FRAME_INTERVAL != 0:
-                continue
-
-            # Frame timestamp in milliseconds.
-            # Using frame_id - 1 follows zero-based frame timing.
-
-            time_stamp = int(
-                ((frame_id - 1) / fps) * 1000
-            )
-
-            try:
-
-                frame_result = (
-                    extractor.extract_features(
-
-                        frame=frame,
-
-                        time_stamp=time_stamp,
-
-                        frame_id=frame_id
-
+                    "y_pixel": float(
+                        landmark.y * height
                     )
-                )
 
-                frame_record = {
+                })
 
-                    "subject": item["subject"],
+            # Hand bounding box
+            xs = [point["x"] for point in landmarks]
 
-                    "video": item["video"],
+            ys = [point["y"] for point in landmarks]
 
-                    "frame_id": frame_id,
+            hand_bbox = {
 
-                    "time_stamp": time_stamp,
+                "x_min": float(min(xs)),
 
-                    "fps": float(fps),
+                "y_min": float(min(ys)),
 
-                    "objects": frame_result["objects"],
+                "x_max": float(max(xs)),
 
-                    "hands": frame_result["hands"],
+                "y_max": float(max(ys))
 
-                    "hand_object_relations": (
-                        frame_result[
-                            "hand_object_relations"
-                        ]
-                    ),
+            }
 
-                    "object_count": (
-                        frame_result["object_count"]
-                    ),
+            hands.append({
 
-                    "hand_count": (
-                        frame_result["hand_count"]
-                    ),
+                "hand_id": hand_index,
 
-                    "relation_count": (
-                        frame_result["relation_count"]
-                    ),
+                "handedness": handedness,
 
-                    "image_width": (
-                        frame_result["image_width"]
-                    ),
+                "handedness_score": handedness_score,
 
-                    "image_height": (
-                        frame_result["image_height"]
-                    ),
+                "landmarks": landmarks,
 
-                    "extraction_error": None
+                "landmark_count": len(landmarks),
 
-                }
+                "bbox_normalized": hand_bbox
 
-            except Exception as e:
+            })
 
-                error_count += 1
+        return hands
 
-                print(
-                    f"ERROR | {item['subject']} | "
-                    f"Frame {frame_id} | {e}"
-                )
 
-                frame_record = {
+    # ============================================================
+    # 3. EXTRACT FEATURES FROM ONE FRAME
+    # ============================================================
 
-                    "subject": item["subject"],
+    def extract_features(
+        self,
+        frame,
+        time_stamp,
+        frame_id
+    ):
 
-                    "video": item["video"],
+        height, width = frame.shape[:2]
 
-                    "frame_id": frame_id,
+        # All detected objects
+        objects = self.extract_objects(frame)
 
-                    "time_stamp": time_stamp,
-
-                    "fps": float(fps),
-
-                    "objects": [],
-
-                    "hands": [],
-
-                    "hand_object_relations": [],
-
-                    "object_count": 0,
-
-                    "hand_count": 0,
-
-                    "relation_count": 0,
-
-                    "image_width": int(frame.shape[1]),
-
-                    "image_height": int(frame.shape[0]),
-
-                    "extraction_error": str(e)
-
-                }
-
-            all_sequences.append(frame_record)
-
-            video_frames += 1
-
-            video_objects += frame_record["object_count"]
-
-            video_hands += frame_record["hand_count"]
-
-            video_relations += frame_record["relation_count"]
-
-            if frame_record["extraction_error"] is None:
-
-                total_objects += frame_record["object_count"]
-
-                total_hands += frame_record["hand_count"]
-
-                total_relations += frame_record["relation_count"]
-
-            if video_frames % 100 == 0:
-
-                print(
-
-                    f"Processed sampled frames: {video_frames} | "
-
-                    f"Objects: {video_objects} | "
-
-                    f"Hands: {video_hands} | "
-
-                    f"Relations: {video_relations}"
-
-                )
-
-        cap.release()
-
-        total_frames += video_frames
-
-        video_summaries.append({
-
-            "subject": item["subject"],
-
-            "video": item["video"],
-
-            "fps": float(fps),
-
-            "sampled_frames": video_frames,
-
-            "objects": video_objects,
-
-            "hands": video_hands,
-
-            "relations": video_relations
-
-        })
-
-        print("\nVIDEO SUMMARY")
-
-        print("Sampled frames:", video_frames)
-
-        print("Objects:", video_objects)
-
-        print("Hands:", video_hands)
-
-        print("Hand-object relations:", video_relations)
-
-
-finally:
-
-    extractor.close()
-
-
-# ============================================================
-# 6. SAVE DATA
-# ============================================================
-
-with open(output_path, "wb") as f:
-
-    pickle.dump(
-        all_sequences,
-        f,
-        protocol=pickle.HIGHEST_PROTOCOL
-    )
-
-
-# ============================================================
-# 7. FINAL AUDIT
-# ============================================================
-
-print("\n")
-print("=" * 70)
-print("FINAL EXTRACTION AUDIT")
-print("=" * 70)
-
-print("Videos:", len(video_summaries))
-
-print("Sampled frames:", total_frames)
-
-print("Objects:", total_objects)
-
-print("Hands:", total_hands)
-
-print("Hand-object relations:", total_relations)
-
-print("Extraction errors:", error_count)
-
-
-# Object class distribution
-
-class_counter = Counter()
-
-for frame in all_sequences:
-
-    if frame["extraction_error"] is not None:
-        continue
-
-    for obj in frame["objects"]:
-
-        class_counter[obj["name"]] += 1
-
-
-print("\nOBJECT CLASS DISTRIBUTION")
-
-for name, count in class_counter.most_common():
-
-    print(f"{name:20s}: {count}")
-
-
-# Handedness distribution
-
-hand_counter = Counter()
-
-for frame in all_sequences:
-
-    if frame["extraction_error"] is not None:
-        continue
-
-    for hand in frame["hands"]:
-
-        hand_counter[hand["handedness"]] += 1
-
-
-print("\nHAND DISTRIBUTION")
-
-for name, count in hand_counter.items():
-
-    print(f"{name:20s}: {count}")
-
-
-# Landmark verification
-
-valid_hand_records = [
-
-    hand
-
-    for frame in all_sequences
-
-    if frame["extraction_error"] is None
-
-    for hand in frame["hands"]
-
-]
-
-if valid_hand_records:
-
-    landmark_counts = Counter(
-
-        len(hand["landmarks"])
-
-        for hand in valid_hand_records
-
-    )
-
-    print("\nLANDMARK COUNT AUDIT")
-
-    for count, frequency in landmark_counts.items():
-
-        print(
-            f"{count} landmarks: {frequency} hands"
+        # All detected hands
+        hands = self.extract_hands(
+            frame,
+            time_stamp
         )
 
-    assert all(
-        len(hand["landmarks"]) == 21
-        for hand in valid_hand_records
-    ), "Some hands do not have exactly 21 landmarks."
+        # No hand-object distance calculation.
+        # No object filtering by confidence.
+        # No artificial zero landmarks.
+
+        frame_features = {
+
+            "frame_id": frame_id,
+
+            "time_stamp": time_stamp,
+
+            "image_width": width,
+
+            "image_height": height,
+
+            "objects": objects,
+
+            "hands": hands,
+
+            "object_count": len(objects),
+
+            "hand_count": len(hands)
+
+        }
+
+        return frame_features
 
 
-print("\nVIDEO SUMMARIES")
+    # ============================================================
+    # 4. CLOSE MEDIAPIPE
+    # ============================================================
 
-for summary in video_summaries:
+    def close(self):
 
-    print(summary)
+        if self.detector is not None:
 
+            self.detector.close()
 
-print("\nSaved:", output_path)
-
-print("Extraction completed.")
