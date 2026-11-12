@@ -1,5 +1,6 @@
 
 from ultralytics import YOLO
+import torch
 import cv2
 import numpy as np
 import mediapipe as mp
@@ -13,19 +14,49 @@ class ObjectHandFeatureExtractor:
         self,
         model_path,
         yolo_model="yolo11n.pt",
+        white_paper_model_path="/content/drive/MyDrive/Online_Exam_Cheating/white_paper_best.pt",
         device=None
     ):
 
         self.model_path = model_path
         self.device = device
 
+        # ========================================================
+        # YOLO11 MODEL
+        # ========================================================
+
         self.model = YOLO(yolo_model)
+
+        # ========================================================
+        # CUSTOM YOLOv5 MODEL - WHITE PAPER
+        # ========================================================
+
+        self.paper_model = torch.hub.load(
+            "/content/yolov5",
+            "custom",
+            path=white_paper_model_path,
+            source="local"
+        )
+
+        if self.device is not None:
+            self.paper_model.to(self.device)
+
+        # Separate confidence thresholds
+        self.BOOK_THRESHOLD = 0.40
+        self.PAPER_THRESHOLD = 0.05
+
+        self.paper_model.conf = self.PAPER_THRESHOLD
+
+        # ========================================================
+        # CLASS DEFINITIONS
+        # ========================================================
 
         self.classes = {
             0: "person",
             63: "laptop",
             67: "cell phone",
-            73: "book"
+            73: "book",
+            80: "white-paper"
         }
 
         # ========================================================
@@ -103,7 +134,7 @@ class ObjectHandFeatureExtractor:
 
 
     # ============================================================
-    # 1. EXTRACT ALL YOLO OBJECTS
+    # 1. EXTRACT YOLO11 OBJECTS + WHITE PAPER
     # ============================================================
 
     def extract_objects(self, frame):
@@ -112,16 +143,20 @@ class ObjectHandFeatureExtractor:
 
         height, width = frame.shape[:2]
 
+        # --------------------------------------------------------
+        # YOLO11: PERSON, LAPTOP, CELL PHONE, BOOK
+        # --------------------------------------------------------
+
         results = self.model(
             frame,
-            classes=list(self.classes.keys()),
+            classes=[0, 63, 67, 73],
             verbose=False,
             device=self.device
         )
 
         for result in results:
 
-            for i, box in enumerate(result.boxes):
+            for box in result.boxes:
 
                 class_id = int(box.cls[0].item())
 
@@ -129,7 +164,13 @@ class ObjectHandFeatureExtractor:
                     box.conf[0].item()
                 )
 
-                # Pixel coordinates
+                # Separate book threshold
+                if (
+                    class_id == 73
+                    and confidence < self.BOOK_THRESHOLD
+                ):
+                    continue
+
                 bbox_xyxy = (
                     box.xyxy[0]
                     .cpu()
@@ -137,7 +178,6 @@ class ObjectHandFeatureExtractor:
                     .astype(np.float32)
                 )
 
-                # Normalized coordinates
                 bbox_normalized = (
                     box.xyxyn[0]
                     .cpu()
@@ -174,11 +214,70 @@ class ObjectHandFeatureExtractor:
                     ],
 
                     "center_normalized": [
-
                         float((xn1 + xn2) / 2),
-
                         float((yn1 + yn2) / 2)
+                    ],
 
+                    "width_normalized": float(xn2 - xn1),
+
+                    "height_normalized": float(yn2 - yn1)
+
+                })
+
+        # --------------------------------------------------------
+        # YOLOv5: WHITE PAPER
+        # --------------------------------------------------------
+
+        paper_results = self.paper_model(
+            frame,
+            size=640
+        )
+
+        for detections in paper_results.xyxy:
+
+            for detection in detections:
+
+                confidence = float(detection[4])
+
+                if confidence < self.PAPER_THRESHOLD:
+                    continue
+
+                x1, y1, x2, y2 = (
+                    detection[:4].cpu().numpy()
+                )
+
+                xn1 = x1 / width
+                yn1 = y1 / height
+                xn2 = x2 / width
+                yn2 = y2 / height
+
+                objects.append({
+
+                    "detection_id": len(objects),
+
+                    "class_id": 80,
+
+                    "name": "white-paper",
+
+                    "conf": confidence,
+
+                    "bbox_xyxy": [
+                        float(x1),
+                        float(y1),
+                        float(x2),
+                        float(y2)
+                    ],
+
+                    "bbox_normalized": [
+                        float(xn1),
+                        float(yn1),
+                        float(xn2),
+                        float(yn2)
+                    ],
+
+                    "center_normalized": [
+                        float((xn1 + xn2) / 2),
+                        float((yn1 + yn2) / 2)
                     ],
 
                     "width_normalized": float(xn2 - xn1),
@@ -308,18 +407,12 @@ class ObjectHandFeatureExtractor:
 
         height, width = frame.shape[:2]
 
-        # All detected objects
         objects = self.extract_objects(frame)
 
-        # All detected hands
         hands = self.extract_hands(
             frame,
             time_stamp
         )
-
-        # No hand-object distance calculation.
-        # No object filtering by confidence.
-        # No artificial zero landmarks.
 
         frame_features = {
 
@@ -351,6 +444,6 @@ class ObjectHandFeatureExtractor:
     def close(self):
 
         if self.detector is not None:
-
             self.detector.close()
+
 
