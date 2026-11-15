@@ -153,7 +153,7 @@ class ObjectHandFeatureExtractor:
         ]
 
     # ============================================================
-    # AUTocast CONTEXT
+    # AUTOCAST CONTEXT
     # ============================================================
 
     def _autocast_context(self):
@@ -585,18 +585,12 @@ class ObjectHandFeatureExtractor:
                 if not ret:
                     break
 
-                # ------------------------------------------------
                 # Timestamp in milliseconds
-                # ------------------------------------------------
-
                 time_stamp = int(
                     frame_id * 1000 / fps
                 )
 
-                # ------------------------------------------------
                 # Detect and track paper in every frame
-                # ------------------------------------------------
-
                 paper_objects = self.track_paper(
                     frame
                 )
@@ -605,10 +599,7 @@ class ObjectHandFeatureExtractor:
                     paper_objects
                 )
 
-                # ------------------------------------------------
                 # Extract YOLO11 and MediaPipe features
-                # ------------------------------------------------
-
                 features = self.extract_features(
                     frame=frame,
                     time_stamp=time_stamp,
@@ -624,8 +615,6 @@ class ObjectHandFeatureExtractor:
                 raise RuntimeError(
                     "No frames were extracted from the AVI."
                 )
-
-            print(f"Processed {frame_id} frames.")
 
             return (
                 frame_features_list,
@@ -644,6 +633,7 @@ class ObjectHandFeatureExtractor:
 
         if self.detector is not None:
             self.detector.close()
+            self.detector = None
 
         if self.detector is not None:
             self.detector.close()
