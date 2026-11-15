@@ -2,16 +2,15 @@
 import os
 import cv2
 import torch
-import shutil
-import tempfile
 import numpy as np
 import mediapipe as mp
 
+from argparse import Namespace
 from contextlib import nullcontext
 from ultralytics import YOLO
 from mediapipe.tasks.python import vision
 
-from sam2.build_sam import build_sam2_video_predictor
+from yolox.tracker.byte_tracker import BYTETracker
 
 
 class ObjectHandFeatureExtractor:
@@ -21,8 +20,6 @@ class ObjectHandFeatureExtractor:
         model_path,
         yolo_model="yolo11n.pt",
         white_paper_model_path="/content/drive/MyDrive/Online_Exam_Cheating/white_paper_best.pt",
-        sam2_checkpoint="/content/sam2/checkpoints/sam2.1_hiera_small.pt",
-        sam2_model_cfg="configs/sam2.1/sam2.1_hiera_s.yaml",
         device=None
     ):
 
@@ -57,24 +54,20 @@ class ObjectHandFeatureExtractor:
         self.paper_model.conf = self.PAPER_THRESHOLD
 
         # ========================================================
-        # SAM2 VIDEO PREDICTOR
+        # BYTE TRACKER
         # ========================================================
 
-        self.paper_predictor = build_sam2_video_predictor(
-            sam2_model_cfg,
-            sam2_checkpoint,
-            device=self.device
+        tracker_args = Namespace(
+            track_thresh=0.5,
+            track_buffer=30,
+            match_thresh=0.8,
+            mot20=False
         )
 
-        self.inference_state = None
-
-        self.paper_tracking_started = False
-
-        self.paper_start_frame = None
-
-        self.paper_obj_id = 1
-
-        self.paper_initial_confidence = None
+        self.paper_tracker = BYTETracker(
+            tracker_args,
+            frame_rate=25
+        )
 
         # ========================================================
         # CLASS DEFINITIONS
@@ -268,182 +261,98 @@ class ObjectHandFeatureExtractor:
         return objects
 
     # ============================================================
-    # 2. DETECT FIRST PAPER WITH YOLOv5
+    # 2. DETECT PAPER WITH YOLOv5 IN EVERY FRAME
     # ============================================================
 
-    def detect_first_paper(self, video_frames_dir):
+    def detect_paper(self, frame):
 
-        frame_names = sorted(
-            [
-                name for name in os.listdir(video_frames_dir)
-                if name.lower().endswith((".jpg", ".jpeg"))
-            ],
-            key=lambda name: int(os.path.splitext(name)[0])
+        paper_results = self.paper_model(
+            frame,
+            size=640
         )
 
-        for frame_name in frame_names:
+        detections = paper_results.xyxy[0]
 
-            frame_id = int(
-                os.path.splitext(frame_name)[0]
-            )
+        if len(detections) == 0:
+            return np.empty((0, 5), dtype=np.float32)
 
-            frame_path = os.path.join(
-                video_frames_dir,
-                frame_name
-            )
+        detections = (
+            detections[:, :5]
+            .detach()
+            .cpu()
+            .numpy()
+            .astype(np.float32)
+        )
 
-            frame = cv2.imread(frame_path)
-
-            if frame is None:
-                continue
-
-            paper_results = self.paper_model(
-                frame,
-                size=640
-            )
-
-            for detections in paper_results.xyxy:
-
-                if len(detections) == 0:
-                    continue
-
-                best_detection = max(
-                    detections,
-                    key=lambda detection: float(detection[4])
-                )
-
-                confidence = float(best_detection[4])
-
-                if confidence < self.PAPER_THRESHOLD:
-                    continue
-
-                x1, y1, x2, y2 = (
-                    best_detection[:4].cpu().numpy()
-                )
-
-                bbox = np.array(
-                    [x1, y1, x2, y2],
-                    dtype=np.float32
-                )
-
-                return frame_id, bbox, confidence
-
-        return None, None, None
+        return detections
 
     # ============================================================
-    # 3. INITIALIZE SAM2 WITH FIRST PAPER DETECTION
+    # 3. TRACK PAPER WITH BYTE TRACK
     # ============================================================
 
-    def initialize_paper_tracking(
+    def track_paper(self, frame):
+
+        height, width = frame.shape[:2]
+
+        detections = self.detect_paper(frame)
+
+        online_targets = self.paper_tracker.update(
+            detections,
+            (height, width),
+            (height, width)
+        )
+
+        paper_objects = []
+
+        for track in online_targets:
+
+            bbox = track.tlbr
+
+            paper_object = self.bbox_to_paper_object(
+                bbox=bbox,
+                confidence=float(track.score),
+                track_id=int(track.track_id),
+                detection_id=len(paper_objects),
+                frame_width=width,
+                frame_height=height
+            )
+
+            paper_objects.append(paper_object)
+
+        return paper_objects
+
+    # ============================================================
+    # 4. CONVERT BYTE TRACK BBOX TO PAPER OBJECT
+    # ============================================================
+
+    def bbox_to_paper_object(
         self,
-        frame_id,
         bbox,
-        confidence
-    ):
-
-        self.paper_start_frame = frame_id
-
-        self.paper_initial_confidence = confidence
-
-        with torch.inference_mode(), self._autocast_context():
-
-            _, out_obj_ids, out_mask_logits = (
-                self.paper_predictor.add_new_points_or_box(
-
-                    inference_state=self.inference_state,
-
-                    frame_idx=frame_id,
-
-                    obj_id=self.paper_obj_id,
-
-                    box=bbox
-
-                )
-            )
-
-        self.paper_tracking_started = True
-
-        print(
-            f"Paper detected at frame {frame_id}. "
-            f"SAM2 tracking initialized."
-        )
-
-    # ============================================================
-    # 4. PROPAGATE PAPER THROUGH VIDEO
-    # ============================================================
-
-    def track_paper(self):
-
-        video_segments = {}
-
-        if not self.paper_tracking_started:
-
-            print("No paper detected in the video.")
-
-            return video_segments
-
-        with torch.inference_mode(), self._autocast_context():
-
-            for (
-                out_frame_idx,
-                out_obj_ids,
-                out_mask_logits
-            ) in self.paper_predictor.propagate_in_video(
-                self.inference_state
-            ):
-
-                for i, out_obj_id in enumerate(out_obj_ids):
-
-                    if out_obj_id != self.paper_obj_id:
-                        continue
-
-                    mask = (
-                        out_mask_logits[i] > 0.0
-                    ).squeeze().cpu().numpy()
-
-                    video_segments[out_frame_idx] = mask
-
-        return video_segments
-
-    # ============================================================
-    # 5. CONVERT SAM2 MASK TO PAPER OBJECT
-    # ============================================================
-
-    def mask_to_paper_object(
-        self,
-        mask,
+        confidence,
+        track_id,
         detection_id,
-        frame_id
+        frame_width,
+        frame_height
     ):
 
-        if mask is None or not np.any(mask):
-            return None
+        x1, y1, x2, y2 = bbox
 
-        height, width = mask.shape
+        x1 = float(np.clip(x1, 0, frame_width))
+        y1 = float(np.clip(y1, 0, frame_height))
+        x2 = float(np.clip(x2, 0, frame_width))
+        y2 = float(np.clip(y2, 0, frame_height))
 
-        ys, xs = np.where(mask)
+        xn1 = x1 / frame_width
+        yn1 = y1 / frame_height
 
-        x1 = int(xs.min())
-        y1 = int(ys.min())
-
-        x2 = int(xs.max()) + 1
-        y2 = int(ys.max()) + 1
-
-        xn1 = x1 / width
-        yn1 = y1 / height
-
-        xn2 = x2 / width
-        yn2 = y2 / height
-
-        confidence = (
-            self.paper_initial_confidence
-            if frame_id == self.paper_start_frame
-            else None
-        )
+        xn2 = x2 / frame_width
+        yn2 = y2 / frame_height
 
         return {
 
             "detection_id": detection_id,
+
+            "track_id": track_id,
 
             "class_id": 80,
 
@@ -452,10 +361,10 @@ class ObjectHandFeatureExtractor:
             "conf": confidence,
 
             "bbox_xyxy": [
-                float(x1),
-                float(y1),
-                float(x2),
-                float(y2)
+                x1,
+                y1,
+                x2,
+                y2
             ],
 
             "bbox_normalized": [
@@ -477,7 +386,7 @@ class ObjectHandFeatureExtractor:
         }
 
     # ============================================================
-    # 6. EXTRACT ALL HANDS AND 21 LANDMARKS
+    # 5. EXTRACT ALL HANDS AND 21 LANDMARKS
     # ============================================================
 
     def extract_hands(self, frame, time_stamp):
@@ -584,7 +493,7 @@ class ObjectHandFeatureExtractor:
         return hands
 
     # ============================================================
-    # 7. EXTRACT FEATURES FROM ONE FRAME
+    # 6. EXTRACT FEATURES FROM ONE FRAME
     # ============================================================
 
     def extract_features(
@@ -592,24 +501,16 @@ class ObjectHandFeatureExtractor:
         frame,
         time_stamp,
         frame_id,
-        paper_mask=None
+        paper_objects=None
     ):
 
         height, width = frame.shape[:2]
 
         objects = self.extract_objects(frame)
 
-        # Add paper position from SAM2 mask
-        if paper_mask is not None:
-
-            paper_object = self.mask_to_paper_object(
-                paper_mask,
-                detection_id=len(objects),
-                frame_id=frame_id
-            )
-
-            if paper_object is not None:
-                objects.append(paper_object)
+        # Add ByteTrack paper objects
+        if paper_objects is not None:
+            objects.extend(paper_objects)
 
         hands = self.extract_hands(
             frame,
@@ -639,52 +540,43 @@ class ObjectHandFeatureExtractor:
         return frame_features
 
     # ============================================================
-    # 8. PROCESS COMPLETE AVI VIDEO
+    # 7. PROCESS COMPLETE AVI VIDEO
     # ============================================================
 
     def process_video(self, video_path):
 
-        if self.inference_state is not None:
+        # Reset ByteTrack for a new video
+        tracker_args = Namespace(
+            track_thresh=0.5,
+            track_buffer=30,
+            match_thresh=0.8,
+            mot20=False
+        )
 
-            self.paper_predictor.reset_state(
-                self.inference_state
-            )
-
-            self.inference_state = None
-
-        self.paper_tracking_started = False
-
-        self.paper_start_frame = None
-
-        self.paper_initial_confidence = None
-
-        video_frames_dir = tempfile.mkdtemp(
-            prefix="sam2_video_frames_"
+        self.paper_tracker = BYTETracker(
+            tracker_args,
+            frame_rate=25
         )
 
         frame_features_list = []
 
-        video_segments = {}
+        paper_tracks_by_frame = {}
+
+        cap = cv2.VideoCapture(video_path)
+
+        if not cap.isOpened():
+            raise RuntimeError(
+                f"Cannot open video: {video_path}"
+            )
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        if fps <= 0:
+            fps = 25.0
+
+        frame_id = 0
 
         try:
-
-            # ----------------------------------------------------
-            # Convert AVI to numbered JPG frames
-            # ----------------------------------------------------
-
-            cap = cv2.VideoCapture(video_path)
-
-            if not cap.isOpened():
-                raise RuntimeError(
-                    f"Cannot open video: {video_path}"
-                )
-
-            fps = cap.get(cv2.CAP_PROP_FPS)
-
-            if fps <= 0:
-                fps = 25.0
-
-            frame_id = 0
 
             while True:
 
@@ -693,144 +585,65 @@ class ObjectHandFeatureExtractor:
                 if not ret:
                     break
 
-                frame_path = os.path.join(
-                    video_frames_dir,
-                    f"{frame_id:06d}.jpg"
+                # ------------------------------------------------
+                # Timestamp in milliseconds
+                # ------------------------------------------------
+
+                time_stamp = int(
+                    frame_id * 1000 / fps
                 )
 
-                if not cv2.imwrite(frame_path, frame):
-                    raise RuntimeError(
-                        f"Could not save frame {frame_id}"
-                    )
+                # ------------------------------------------------
+                # Detect and track paper in every frame
+                # ------------------------------------------------
+
+                paper_objects = self.track_paper(
+                    frame
+                )
+
+                paper_tracks_by_frame[frame_id] = (
+                    paper_objects
+                )
+
+                # ------------------------------------------------
+                # Extract YOLO11 and MediaPipe features
+                # ------------------------------------------------
+
+                features = self.extract_features(
+                    frame=frame,
+                    time_stamp=time_stamp,
+                    frame_id=frame_id,
+                    paper_objects=paper_objects
+                )
+
+                frame_features_list.append(features)
 
                 frame_id += 1
-
-            cap.release()
 
             if frame_id == 0:
                 raise RuntimeError(
                     "No frames were extracted from the AVI."
                 )
 
-            print(f"Extracted {frame_id} frames.")
+            print(f"Processed {frame_id} frames.")
 
-            # ----------------------------------------------------
-            # Initialize SAM2 video state
-            # ----------------------------------------------------
-
-            self.inference_state = (
-                self.paper_predictor.init_state(
-                    video_path=video_frames_dir
-                )
+            return (
+                frame_features_list,
+                paper_tracks_by_frame
             )
-
-            # ----------------------------------------------------
-            # Find first valid paper detection
-            # ----------------------------------------------------
-
-            first_frame_id, first_bbox, confidence = (
-                self.detect_first_paper(video_frames_dir)
-            )
-
-            # ----------------------------------------------------
-            # Initialize tracking at first detection
-            # ----------------------------------------------------
-
-            if first_frame_id is not None:
-
-                self.initialize_paper_tracking(
-                    first_frame_id,
-                    first_bbox,
-                    confidence
-                )
-
-                # ------------------------------------------------
-                # Track paper from its first detection onward
-                # ------------------------------------------------
-
-                video_segments = self.track_paper()
-
-            else:
-
-                print(
-                    "No valid paper detection found. "
-                    "SAM2 tracking was not started."
-                )
-
-            # ----------------------------------------------------
-            # Extract features from every original frame
-            # ----------------------------------------------------
-
-            frame_names = sorted(
-                [
-                    name for name in os.listdir(video_frames_dir)
-                    if name.lower().endswith((".jpg", ".jpeg"))
-                ],
-                key=lambda name: int(
-                    os.path.splitext(name)[0]
-                )
-            )
-
-            for frame_name in frame_names:
-
-                current_frame_id = int(
-                    os.path.splitext(frame_name)[0]
-                )
-
-                frame_path = os.path.join(
-                    video_frames_dir,
-                    frame_name
-                )
-
-                frame = cv2.imread(frame_path)
-
-                if frame is None:
-                    continue
-
-                # MediaPipe timestamp in milliseconds
-                time_stamp = int(
-                    current_frame_id * 1000 / fps
-                )
-
-                paper_mask = video_segments.get(
-                    current_frame_id
-                )
-
-                features = self.extract_features(
-                    frame=frame,
-                    time_stamp=time_stamp,
-                    frame_id=current_frame_id,
-                    paper_mask=paper_mask
-                )
-
-                frame_features_list.append(features)
-
-            return frame_features_list, video_segments
 
         finally:
 
-            shutil.rmtree(
-                video_frames_dir,
-                ignore_errors=True
-            )
+            cap.release()
 
     # ============================================================
-    # 9. CLOSE MODELS
+    # 8. CLOSE MODELS
     # ============================================================
 
     def close(self):
 
-        if self.inference_state is not None:
-
-            self.paper_predictor.reset_state(
-                self.inference_state
-            )
-
-            self.inference_state = None
-
         if self.detector is not None:
             self.detector.close()
-
 
         if self.detector is not None:
             self.detector.close()
