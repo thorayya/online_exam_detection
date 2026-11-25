@@ -25,7 +25,6 @@ paths = [
     if path.endswith(".pkl")
 ]
 
-# مهم: ترتیب فایل‌ها ثابت باشد
 paths = sorted(paths)
 
 datas = []
